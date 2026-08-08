@@ -24,12 +24,13 @@ except ImportError:
     import db
 
 
-def _graph(path, token, params=None):
+def _graph(path, token, params=None, method="GET", data=None):
     q = {"access_token": token}
     if params:
         q.update(params)
     url = f"{config.GRAPH}/{path}?" + urllib.parse.urlencode(q)
-    req = urllib.request.Request(url)
+    body = urllib.parse.urlencode(data or {}).encode() if data else None
+    req = urllib.request.Request(url, data=body, method=method)
     try:
         with urllib.request.urlopen(req, timeout=25) as r:
             return json.loads(r.read().decode())
@@ -231,6 +232,111 @@ def load_ads_view():
     except Exception:
         ads = []
     return {"ads": ads, "fetched_at": at or ""}
+
+
+# ---------- create campaign (boost a post) ----------
+
+# Target kawasan (user-mandated): KL, Selangor, JB, Penang
+GEO_TARGETS = {
+    "KL & Selangor": {"regions": [2549, 2547]},
+    "Johor Bahru": {"cities": [1562288]},
+    "Penang": {"regions": [2545]},
+    "Semua (KL/Sel/JB/Penang)": {"regions": [2549, 2547, 2545], "cities": [1562288]},
+}
+INTEREST_REAL_ESTATE = 6002979192120
+AGE_RANGE = {"min": 25, "max": 45}
+
+
+def create_boost(post_id: str, daily_budget_rm: float, days: int,
+                 area: str = "Semua (KL/Sel/JB/Penang)", token=None):
+    """Create a boosted-post campaign: campaign -> adset -> creative -> ad.
+
+    Returns {"ok": True, "campaign_id", "adset_id", "ad_id", "post_id"}.
+    """
+    if token is None:
+        token = user_token()
+    if not token:
+        return {"ok": False,
+                "error": "Tiada user token. Tampal token di halaman Ads Manager dulu."}
+    try:
+        accts = get_ad_accounts(token)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    if not accts:
+        return {"ok": False,
+                "error": "Takde ad account dijumpai untuk token ni. Sambung user dalam "
+                         "Ads Manager / Business Manager dulu."}
+    act_id = accts[0]["id"]
+
+    geo = GEO_TARGETS.get(area, GEO_TARGETS["Semua (KL/Sel/JB/Penang)"])
+    targeting = {
+        "geo_locations": geo,
+        "age_min": AGE_RANGE["min"],
+        "age_max": AGE_RANGE["max"],
+        "interests": [{"id": str(INTEREST_REAL_ESTATE)}],
+    }
+    budget = max(int(round(daily_budget_rm * 100)), 100)  # FB guna sen (min RM1)
+    name_base = f"Boost {post_id}"
+
+    try:
+        # 1) Campaign
+        camp = _graph(act_id + "/campaigns", token, params={
+            "name": name_base,
+            "objective": "OUTCOME_ENGAGEMENT",
+            "status": "ACTIVE",
+            "special_ad_categories": "[]",
+        }, method="POST")
+        camp_id = camp.get("id")
+        if not camp_id:
+            return {"ok": False, "error": f"Campaign gagal: {camp}"}
+        # 2) AdSet
+        adset = _graph(act_id + "/adsets", token, params={
+            "name": name_base + " set",
+            "campaign_id": camp_id,
+            "billing_event": "IMPRESSIONS",
+            "optimization_goal": "POST_ENGAGEMENT",
+            "bid_strategy": "LOWEST_COST_WITHOUT_CAP",
+            "daily_budget": str(budget),
+            "targeting": json.dumps(targeting),
+            "status": "ACTIVE",
+            "start_time": datetime.now(timezone.utc).isoformat(),
+        }, method="POST")
+        adset_id = adset.get("id")
+        if not adset_id:
+            return {"ok": False, "error": f"AdSet gagal: {adset}", "campaign_id": camp_id}
+        # 3) Creative (boost page post)
+        creative = _graph(act_id + "/adcreatives", token, params={
+            "name": name_base + " creative",
+            "object_story_id": post_id,
+        }, method="POST")
+        creative_id = creative.get("id")
+        if not creative_id:
+            return {"ok": False, "error": f"Creative gagal: {creative}",
+                    "campaign_id": camp_id, "adset_id": adset_id}
+        # 4) Ad
+        ad = _graph(act_id + "/ads", token, params={
+            "name": name_base + " ad",
+            "adset_id": adset_id,
+            "creative": json.dumps({"creative_id": creative_id}),
+            "status": "ACTIVE",
+        }, method="POST")
+        ad_id = ad.get("id")
+        if not ad_id:
+            return {"ok": False, "error": f"Ad gagal: {ad}",
+                    "campaign_id": camp_id, "adset_id": adset_id}
+        # Simpan rekod campaign dalam DB
+        camps = json.loads(db.get_setting("ad_campaigns", "[]") or "[]")
+        camps.append({
+            "campaign_id": camp_id, "adset_id": adset_id, "ad_id": ad_id,
+            "post_id": post_id, "area": area,
+            "daily_budget_rm": daily_budget_rm, "days": days,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        })
+        db.set_setting("ad_campaigns", json.dumps(camps))
+        return {"ok": True, "campaign_id": camp_id, "adset_id": adset_id,
+                "ad_id": ad_id, "post_id": post_id}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 def exchange_long_lived(short_token):

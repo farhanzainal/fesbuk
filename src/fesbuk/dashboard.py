@@ -734,6 +734,14 @@ ADS_HTML = """<!doctype html>
   .ad-meta b { color:var(--ink); }
   .ad-link { display:inline-block; margin-top:10px; font-size:13px; font-weight:700; color:var(--accent); text-decoration:none; }
   .ad-link:hover { text-decoration:underline; }
+  /* ---------- BOOST FORM ---------- */
+  .boost-form { display:flex; flex-direction:column; gap:14px; }
+  .bf-row { display:flex; flex-direction:column; gap:6px; }
+  .bf-row label { font-size:12px; font-weight:700; color:var(--muted); }
+  .bf-row select, .bf-row input { padding:9px 12px; border:1.5px solid rgba(79,110,247,.35); border-radius:10px; font-size:13px; background:#fff; }
+  .bf-row select:focus, .bf-row input:focus { outline:none; border-color:var(--accent); }
+  .bf-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; }
+  .bf-hint { font-size:11px; color:var(--muted); }
 </style>
 </head>
 <body>
@@ -818,6 +826,45 @@ ADS_HTML = """<!doctype html>
     <div class="empty">Belum ada data boosted posts. Tekan ⟳ Refresh untuk tarik senarai ads dari FB.</div>
     {% endif %}
   </div>
+
+  <h2>🚀 Running Ads / Campaign</h2>
+  <div class="glass">
+    <div class="boost-form">
+      <div class="bf-row">
+        <label>Post nak boost:</label>
+        <select id="bfPost">
+          <option value="">— pilih post —</option>
+          {% for p in page_posts %}
+          <option value="{{ p.id }}">{{ p.created }} · {{ p.label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="bf-row bf-grid">
+        <div>
+          <label>Budget harian (RM):</label>
+          <input type="number" id="bfBudget" value="20" min="1" step="1">
+        </div>
+        <div>
+          <label>Tempoh (hari):</label>
+          <input type="number" id="bfDays" value="3" min="1" max="30" step="1">
+        </div>
+        <div>
+          <label>Kawasan:</label>
+          <select id="bfArea">
+            <option>Semua (KL/Sel/JB/Penang)</option>
+            <option>KL & Selangor</option>
+            <option>Johor Bahru</option>
+            <option>Penang</option>
+          </select>
+        </div>
+      </div>
+      <div class="bf-row">
+        <div class="err" id="boostErr"></div>
+        <button class="btn primary" onclick="createBoost(this)">🚀 Boost Sekarang</button>
+        <span class="bf-hint">Target: 25–45 thn · minat Real Estate · objective engagement</span>
+      </div>
+    </div>
+  </div>
   {% else %}
 
   <h2>🔑 Aktifkan Token Ads</h2>
@@ -886,6 +933,34 @@ function refreshSpend(btn){
 }
 function fmtRM(v){ return 'RM' + Number(v||0).toFixed(2); }
 function fmtN(v){ return Number(v||0).toLocaleString('en-MY'); }
+function createBoost(btn){
+  var post = document.getElementById('bfPost').value;
+  var err = document.getElementById('boostErr');
+  if(!post){ err.textContent = '❌ Pilih post dulu.'; return; }
+  var budget = parseFloat(document.getElementById('bfBudget').value);
+  var days = parseInt(document.getElementById('bfDays').value, 10);
+  var area = document.getElementById('bfArea').value;
+  if(!budget || budget < 1){ err.textContent = '❌ Budget kena sekurang-kurangnya RM1.'; return; }
+  if(!days || days < 1){ err.textContent = '❌ Tempoh kena sekurang-kurangnya 1 hari.'; return; }
+  var total = (budget * days).toFixed(2);
+  if(!confirm('Boost post ni?\\n\\nBudget: RM' + budget + '/hari x ' + days + ' hari = RM' + total + '\\nKawasan: ' + area + '\\n\\nTarget 25-45 thn, minat Real Estate.\\nTeruskan?')) return;
+  btn.disabled = true; btn.textContent = 'Mencipta campaign...';
+  fetch('/api/ads/boost', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({post_id: post, budget: budget, days: days, area: area})})
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      if(d.ok){
+        alert('✅ Campaign dicipta!\\n\\nCampaign: ' + d.campaign_id + '\\nAd: ' + d.ad_id + '\\n\\nSedia untuk review di Ads Manager.');
+        location.href = '/ads';
+      } else {
+        err.textContent = '❌ ' + (d.error || 'Gagal. Cuba lagi.');
+        btn.disabled = false; btn.textContent = '🚀 Boost Sekarang';
+      }
+    })
+    .catch(function(e){
+      err.textContent = '❌ ' + e;
+      btn.disabled = false; btn.textContent = '🚀 Boost Sekarang';
+    });
+}
 function viewAd(id){
   var ad = null;
   for(var i=0;i<ADS_DATA.length;i++){ if(ADS_DATA[i].id === id){ ad = ADS_DATA[i]; break; } }
@@ -1077,6 +1152,20 @@ def ads_page():
     activated_flag = request.args.get("activated") == "1"
     view = _spend_view()  # panggil sekali sahaja (elak API dipukul 3x)
     ads = fb_spend.load_ads_view()
+    # Senarai post page untuk dropdown boost
+    page_posts = []
+    pt = config.load_token()
+    if pt:
+        try:
+            data = _graph(config.PAGE_ID + "/posts", pt, "id,message,created_time")
+            for p in data.get("data", [])[:10]:
+                page_posts.append({
+                    "id": p["id"],
+                    "label": (p.get("message") or "(tanpa teks)").replace("\n", " ")[:60],
+                    "created": (p.get("created_time") or "")[:10],
+                })
+        except Exception:
+            page_posts = []
     return render_template_string(
         ADS_HTML,
         activated=bool(view.get("ok")),
@@ -1085,6 +1174,7 @@ def ads_page():
         app_id=app_id,
         activated_flag=activated_flag,
         ads_view=ads,
+        page_posts=page_posts,
         now=datetime.now().strftime("%d %b %Y %H:%M"),
         token_ok=True,
         config_page=config.PAGE_ID or "-",
@@ -1106,6 +1196,30 @@ def api_ads_refresh():
             "ads": res2.get("ok", False),
             "ad_count": res2.get("count", 0),
         })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/ads/boost", methods=["POST"])
+def api_ads_boost():
+    """Create boosted-post campaign terus dari dashboard."""
+    try:
+        data = request.get_json(silent=True) or {}
+        post_id = (data.get("post_id") or "").strip()
+        if not post_id:
+            return jsonify({"ok": False, "error": "Pilih post dulu."}), 400
+        try:
+            budget = float(data.get("budget", 20))
+            days = int(data.get("days", 3))
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "Budget/hari tak sah."}), 400
+        area = (data.get("area") or "Semua (KL/Sel/JB/Penang)").strip()
+        res = fb_spend.create_boost(post_id, budget, days, area)
+        if res.get("ok"):
+            # Tarik semula senarai ads supaya nampak campaign baru
+            fb_spend.pull_ads()
+            return jsonify(res)
+        return jsonify(res), 400
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
