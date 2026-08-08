@@ -714,8 +714,13 @@ ADS_HTML = """<!doctype html>
   .st { display:inline-block; padding:2px 10px; border-radius:12px; font-size:11px; font-weight:700; }
   .st-active { background:#dcfce7; color:var(--good); }
   .st-paused { background:#fef3c7; color:#b45309; }
-  .st-archived, .st-deleted, .st-completed { background:#e5e7eb; color:#4b5563; }
-  .st-pending_review { background:#fef3c7; color:#b45309; }
+  .st-archived, .st-deleted, .st-completed, .st-inactive { background:#e5e7eb; color:#4b5563; }
+  .st-pending_review, .st-in_review, .st-in_process, .st-pending_engagement { background:#fef3c7; color:#b45309; }
+  .st-with_issues, .st-error, .st-disapproved, .st-rejected { background:#fee2e2; color:var(--bad); }
+  .detail-status { display:flex; gap:10px; margin:10px 0 4px; flex-wrap:wrap; }
+  .ds-row { display:flex; align-items:center; gap:8px; background:rgba(30,40,90,.04); border-radius:10px; padding:8px 12px; font-size:13px; }
+  .ds-row span { color:var(--muted); font-weight:600; }
+  .detail-sub { font-size:12px; color:var(--muted); margin:4px 0; }
   /* ---------- MODAL ---------- */
   .modal { display:none; position:fixed; inset:0; background:rgba(15,23,42,.55); z-index:50; align-items:center; justify-content:center; padding:20px; }
   .modal.open { display:flex; }
@@ -740,8 +745,15 @@ ADS_HTML = """<!doctype html>
   .bf-row label { font-size:12px; font-weight:700; color:var(--muted); }
   .bf-row select, .bf-row input { padding:9px 12px; border:1.5px solid rgba(79,110,247,.35); border-radius:10px; font-size:13px; background:#fff; }
   .bf-row select:focus, .bf-row input:focus { outline:none; border-color:var(--accent); }
-  .bf-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; }
+  .bf-grid { display:grid; grid-template-columns:repeat(2,1fr); gap:12px; }
   .bf-hint { font-size:11px; color:var(--muted); }
+  .bf-search { display:flex; gap:8px; }
+  .bf-search input { flex:1; }
+  .int-list { display:flex; flex-direction:column; gap:6px; margin-top:6px; }
+  .int-item { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:8px 12px; border:1px solid rgba(79,110,247,.2); border-radius:10px; cursor:pointer; font-size:13px; background:#f8fafc; }
+  .int-item:hover { border-color:var(--accent); background:#eef1fb; }
+  .int-item.sel { border-color:var(--accent); background:#eef1fb; font-weight:700; }
+  .int-item .aud { font-size:11px; color:var(--muted); }
 </style>
 </head>
 <body>
@@ -810,12 +822,12 @@ ADS_HTML = """<!doctype html>
       {% for ad in ads_view.ads %}
         <tr>
           <td class="td-name">{{ ad.name }}</td>
-          <td><span class="st st-{{ ad.status|lower }}">{{ ad.status }}</span></td>
+          <td><span class="st st-{{ (ad.campaign_status or ad.status)|lower }}">{{ ad.campaign_status or ad.status }}</span></td>
           <td>{{ ad.days_active }}<br><small>{{ ad.first_day }} → {{ ad.last_day }}</small></td>
           <td><b>RM{{ '%.2f'|format(ad.totals.spend) }}</b></td>
           <td>{{ '{:,}'.format(ad.totals.impressions) }}</td>
           <td>{{ ad.totals.likes }}👍 {{ ad.totals.comments }}💬 {{ ad.totals.shares }}🔗</td>
-          <td><button class="btn" onclick="viewAd('{{ ad.id }}')">View</button></td>
+          <td><button class="btn" onclick="viewAd('{{ ad.id }}')">Detail</button></td>
         </tr>
       {% endfor %}
       </tbody>
@@ -839,16 +851,26 @@ ADS_HTML = """<!doctype html>
           {% endfor %}
         </select>
       </div>
-      <div class="bf-row bf-grid">
-        <div>
+      <div class="bf-row">
+        <label>Objective (matlamat ads):</label>
+        <select id="bfObjective">
+          <option selected>Traffic (klik link)</option>
+          <option>Reach (jangkauan)</option>
+        </select>
+        <span class="bf-hint">Engagement/Leads tak disokong FB untuk boost post via API (error Performance goal).</span>
+      </div>
+      <div class="bf-grid">
+        <div class="bf-row">
           <label>Budget harian (RM):</label>
           <input type="number" id="bfBudget" value="20" min="1" step="1">
         </div>
-        <div>
+        <div class="bf-row">
           <label>Tempoh (hari):</label>
           <input type="number" id="bfDays" value="3" min="1" max="30" step="1">
         </div>
-        <div>
+      </div>
+      <div class="bf-grid">
+        <div class="bf-row">
           <label>Kawasan:</label>
           <select id="bfArea">
             <option>Semua (KL/Sel/JB/Penang)</option>
@@ -857,11 +879,32 @@ ADS_HTML = """<!doctype html>
             <option>Penang</option>
           </select>
         </div>
+        <div class="bf-row">
+          <label>Umur:</label>
+          <select id="bfAge">
+            <option>18-24</option>
+            <option>25-34</option>
+            <option selected>25-45</option>
+            <option>35-44</option>
+            <option>45-54</option>
+            <option>55+</option>
+            <option>Semua (18-65)</option>
+          </select>
+        </div>
+      </div>
+      <div class="bf-row">
+        <label>Minat (taip & cari — contoh: kereta, makanan, travel, hartanah...):</label>
+        <div class="bf-search">
+          <input type="text" id="bfInterestQ" placeholder="Taip minat contoh: kereta / travel / kekal sihat" onkeydown="if(event.key==='Enter'){searchInterests();return false;}">
+          <button class="btn" onclick="searchInterests()">🔍 Cari</button>
+        </div>
+        <div id="interestResults"></div>
+        <input type="hidden" id="bfInterest" value="">
+        <span class="bf-hint" id="interestHint">Belum pilih minat — target broad (semua).</span>
       </div>
       <div class="bf-row">
         <div class="err" id="boostErr"></div>
         <button class="btn primary" onclick="createBoost(this)">🚀 Boost Sekarang</button>
-        <span class="bf-hint">Target: 25–45 thn · minat Real Estate · objective engagement</span>
       </div>
     </div>
   </div>
@@ -933,6 +976,39 @@ function refreshSpend(btn){
 }
 function fmtRM(v){ return 'RM' + Number(v||0).toFixed(2); }
 function fmtN(v){ return Number(v||0).toLocaleString('en-MY'); }
+var INTEREST_ITEMS = [];
+function searchInterests(){
+  var q = document.getElementById('bfInterestQ').value.trim();
+  var box = document.getElementById('interestResults');
+  if(q.length < 2){ box.innerHTML = '<span class="bf-hint">Taip sekurang-kurangnya 2 huruf.</span>'; return; }
+  box.innerHTML = '<span class="bf-hint">Mencari...</span>';
+  fetch('/api/ads/interests?q=' + encodeURIComponent(q))
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      if(!d.ok){ box.innerHTML = '<span class="bf-hint">❌ ' + (d.error || 'Gagal cari.') + '</span>'; return; }
+      if(!d.items.length){ box.innerHTML = '<span class="bf-hint">Tiada hasil untuk "' + q + '". Cuba perkataan lain.</span>'; return; }
+      INTEREST_ITEMS = d.items;
+      var html = '<div class="int-list">';
+      for(var i=0;i<d.items.length;i++){
+        var it = d.items[i];
+        var aud = it.audience ? it.audience.toLocaleString('en-MY') + ' org' : '';
+        html += '<div class="int-item" onclick="pickInterest(' + i + ',this)">' +
+                '<span>' + it.name + '</span><span class="aud">' + aud + '</span></div>';
+      }
+      html += '</div>';
+      box.innerHTML = html;
+    })
+    .catch(function(e){ box.innerHTML = '<span class="bf-hint">Ralat: ' + e + '</span>'; });
+}
+function pickInterest(idx, el){
+  var it = INTEREST_ITEMS[idx];
+  if(!it) return;
+  document.getElementById('bfInterest').value = it.id;
+  document.getElementById('interestHint').textContent = '✅ Minat dipilih: ' + it.name;
+  var items = document.querySelectorAll('.int-item');
+  for(var i=0;i<items.length;i++){ items[i].classList.remove('sel'); }
+  if(el){ el.classList.add('sel'); }
+}
 function createBoost(btn){
   var post = document.getElementById('bfPost').value;
   var err = document.getElementById('boostErr');
@@ -940,12 +1016,16 @@ function createBoost(btn){
   var budget = parseFloat(document.getElementById('bfBudget').value);
   var days = parseInt(document.getElementById('bfDays').value, 10);
   var area = document.getElementById('bfArea').value;
+  var age = document.getElementById('bfAge').value;
+  var interest = document.getElementById('bfInterest').value;
+  var objective = document.getElementById('bfObjective').value;
   if(!budget || budget < 1){ err.textContent = '❌ Budget kena sekurang-kurangnya RM1.'; return; }
   if(!days || days < 1){ err.textContent = '❌ Tempoh kena sekurang-kurangnya 1 hari.'; return; }
   var total = (budget * days).toFixed(2);
-  if(!confirm('Boost post ni?\\n\\nBudget: RM' + budget + '/hari x ' + days + ' hari = RM' + total + '\\nKawasan: ' + area + '\\n\\nTarget 25-45 thn, minat Real Estate.\\nTeruskan?')) return;
+  var intLabel = interest ? (document.getElementById('interestHint').textContent.replace('✅ Minat dipilih: ','')) : 'Broad (semua)';
+  if(!confirm('Boost post ni?\\n\\nObjective: ' + objective + '\\nBudget: RM' + budget + '/hari x ' + days + ' hari = RM' + total + '\\nKawasan: ' + area + '\\nUmur: ' + age + '\\nMinat: ' + intLabel + '\\n\\nTeruskan?')) return;
   btn.disabled = true; btn.textContent = 'Mencipta campaign...';
-  fetch('/api/ads/boost', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({post_id: post, budget: budget, days: days, area: area})})
+  fetch('/api/ads/boost', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({post_id: post, budget: budget, days: days, area: area, age: age, interest: interest, objective: objective})})
     .then(function(r){ return r.json(); })
     .then(function(d){
       if(d.ok){
@@ -961,15 +1041,27 @@ function createBoost(btn){
       btn.disabled = false; btn.textContent = '🚀 Boost Sekarang';
     });
 }
+function stBadge(s){
+  if(!s) return '<span class="st">-</span>';
+  return '<span class="st st-' + String(s).toLowerCase() + '">' + s + '</span>';
+}
 function viewAd(id){
   var ad = null;
   for(var i=0;i<ADS_DATA.length;i++){ if(ADS_DATA[i].id === id){ ad = ADS_DATA[i]; break; } }
   if(!ad) return;
   document.getElementById('mName').textContent = ad.name || ad.id;
-  var meta = 'Status: <b>' + (ad.status||'-') + '</b> · Hari aktif: <b>' + ad.days_active + '</b>';
+  var meta = 'Hari aktif: <b>' + ad.days_active + '</b>';
   if(ad.first_day && ad.last_day){ meta += ' · Tempoh: <b>' + ad.first_day + ' → ' + ad.last_day + '</b>'; }
   if(ad.created_time){ meta += ' · Dibuat: <b>' + ad.created_time.slice(0,10) + '</b>'; }
   document.getElementById('mMeta').innerHTML = meta;
+  var html = '<div class="detail-status">';
+  html += '<div class="ds-row"><span>📣 Campaign</span>' + stBadge(ad.campaign_status) + '</div>';
+  html += '<div class="ds-row"><span>🎯 AdSet</span>' + stBadge(ad.adset_status) + '</div>';
+  html += '<div class="ds-row"><span>📄 Ad</span>' + stBadge(ad.status) + '</div>';
+  html += '</div>';
+  if(ad.campaign_name){ html += '<div class="detail-sub">Campaign: <b>' + ad.campaign_name + '</b> · ' + ad.campaign_id + '</div>'; }
+  if(ad.adset_name){ html += '<div class="detail-sub">AdSet: <b>' + ad.adset_name + '</b> · ' + ad.adset_id + '</div>'; }
+  html += '<div class="detail-sub">Ad ID: <b>' + ad.id + '</b></div>';
   var head = '<table class="day-table"><thead><tr>' +
     '<th>Tarikh</th><th>💸 Spend</th><th>👁️ Imps</th><th>📡 Reach</th><th>🖱️ Clicks</th>' +
     '<th>CTR</th><th>👍 Likes</th><th>💬 Cmt</th><th>🔗 Shares</th></tr></thead><tbody>';
@@ -985,7 +1077,7 @@ function viewAd(id){
     '</td><td>' + fmtN(t.reach) + '</td><td>' + t.clicks + '</td><td>' + Number(t.ctr||0).toFixed(2) + '%</td>' +
     '<td>' + t.likes + '</td><td>' + t.comments + '</td><td>' + t.shares + '</td></tr>';
   var link = ad.post_url ? '<a class="ad-link" href="' + ad.post_url + '" target="_blank">Buka post di Facebook →</a>' : '';
-  document.getElementById('mBody').innerHTML = head + body + '</tbody></table>' + link;
+  document.getElementById('mBody').innerHTML = html + head + body + '</tbody></table>' + link;
   document.getElementById('adModal').classList.add('open');
 }
 function closeModal(){
@@ -1200,6 +1292,31 @@ def api_ads_refresh():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/ads/interests", methods=["GET"])
+def api_ads_interests():
+    """Search FB ad interests (flexible targeting). ?q=perkataan."""
+    try:
+        q = (request.args.get("q") or "").strip()
+        if not q or len(q) < 2:
+            return jsonify({"ok": False, "error": "Taip sekurang-kurangnya 2 huruf."}), 400
+        token = config.load_ads_token()
+        if not token:
+            return jsonify({"ok": False, "error": "Tiada ads token."}), 400
+        data = fb_spend._graph("search", token,
+                               {"type": "adinterest", "q": q, "limit": 8})
+        items = []
+        for it in data.get("data", []):
+            if it.get("id"):
+                items.append({
+                    "id": it["id"],
+                    "name": it.get("name", "?"),
+                    "audience": it.get("audience_size") or 0,
+                })
+        return jsonify({"ok": True, "items": items})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/ads/boost", methods=["POST"])
 def api_ads_boost():
     """Create boosted-post campaign terus dari dashboard."""
@@ -1214,7 +1331,11 @@ def api_ads_boost():
         except (TypeError, ValueError):
             return jsonify({"ok": False, "error": "Budget/hari tak sah."}), 400
         area = (data.get("area") or "Semua (KL/Sel/JB/Penang)").strip()
-        res = fb_spend.create_boost(post_id, budget, days, area)
+        age_range = (data.get("age") or fb_spend.DEFAULT_AGE).strip()
+        interest = (data.get("interest") or fb_spend.DEFAULT_INTEREST).strip()
+        objective = (data.get("objective") or fb_spend.DEFAULT_OBJECTIVE).strip()
+        res = fb_spend.create_boost(post_id, budget, days, area, age_range,
+                                    interest, objective)
         if res.get("ok"):
             # Tarik semula senarai ads supaya nampak campaign baru
             fb_spend.pull_ads()

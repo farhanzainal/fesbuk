@@ -105,13 +105,16 @@ def _i(v):
 
 def fetch_ads_list(act_id, token):
     """GET /act_XXX/ads -> [{id, name, status, effective_status, created_time,
-    adset{start_time,end_time}, creative{object_id,effective_object_story_id}}]."""
+    adset{id,name,status,effective_status,start_time,end_time},
+    campaign{id,name,status,effective_status},
+    creative{object_id,effective_object_story_id}}]."""
     data = _graph(
         f"{act_id}/ads",
         token,
         {
             "fields": "id,name,status,effective_status,created_time,"
-                      "adset{start_time,end_time},"
+                      "adset{id,name,status,effective_status,start_time,end_time},"
+                      "campaign{id,name,status,effective_status},"
                       "creative{object_id,effective_object_story_id}",
             "limit": 100,
         },
@@ -138,6 +141,9 @@ def fetch_ads_daily_breakdown(act_id, token, date_preset="last_7d"):
 def build_ads_view(act_id, token, date_preset="last_7d"):
     """Senarai boosted posts + breakdown harian per post.
 
+    Iterate dari SEMUA ads (termasuk yang baru create & belum ada insights —
+    status review tetap nampak). Ad tanpa breakdown: days kosong, totals 0.
+
     Returns: {"ok": True, "ads": [{id, name, status, created_time,
               days_active, first_day, last_day, post_url, days:[...], totals:{...}}]}
     """
@@ -149,8 +155,14 @@ def build_ads_view(act_id, token, date_preset="last_7d"):
         by_ad.setdefault(r.get("ad_id"), []).append(r)
 
     result = []
-    for aid, rrows in by_ad.items():
+    for aid in info:  # semua ads, bukan hanya yang ada insights
+        rrows = by_ad.get(aid, [])
         inf = info.get(aid, {})
+        # Filter: cuma ads yang promote post page TinjauLokasi
+        creative = inf.get("creative") or {}
+        post_id = creative.get("object_id") or creative.get("effective_object_story_id") or ""
+        if not str(post_id).startswith(config.PAGE_ID + "_"):
+            continue
         days = []
         for r in sorted(rrows, key=lambda x: x.get("date_start", "")):
             eng = _actions_to_dict(r.get("actions"))
@@ -174,13 +186,22 @@ def build_ads_view(act_id, token, date_preset="last_7d"):
         dates = [d["date"] for d in days if d.get("date")]
         creative = inf.get("creative") or {}
         post_id = creative.get("object_id") or creative.get("effective_object_story_id") or ""
+        adset = inf.get("adset") or {}
+        camp = inf.get("campaign") or {}
         result.append({
             "id": aid,
             "name": inf.get("name") or (rrows[0].get("ad_name") if rrows else "") or aid,
             "status": inf.get("effective_status") or inf.get("status") or "",
+            "status_raw": inf.get("status") or "",
             "created_time": inf.get("created_time", ""),
-            "start_time": (inf.get("adset") or {}).get("start_time", ""),
-            "end_time": (inf.get("adset") or {}).get("end_time", ""),
+            "start_time": adset.get("start_time", ""),
+            "end_time": adset.get("end_time", ""),
+            "adset_id": adset.get("id", ""),
+            "adset_name": adset.get("name", ""),
+            "adset_status": adset.get("effective_status") or adset.get("status") or "",
+            "campaign_id": camp.get("id", ""),
+            "campaign_name": camp.get("name", ""),
+            "campaign_status": camp.get("effective_status") or camp.get("status") or "",
             "days_active": len(dates),
             "first_day": min(dates) if dates else "",
             "last_day": max(dates) if dates else "",
@@ -188,7 +209,7 @@ def build_ads_view(act_id, token, date_preset="last_7d"):
             "days": days,
             "totals": totals,
         })
-    result.sort(key=lambda a: a["totals"]["spend"], reverse=True)
+    result.sort(key=lambda a: a["created_time"], reverse=True)
     return {"ok": True, "ads": result, "date_preset": date_preset}
 
 
@@ -237,20 +258,82 @@ def load_ads_view():
 # ---------- create campaign (boost a post) ----------
 
 # Target kawasan (user-mandated): KL, Selangor, JB, Penang
+# Format FB: regions/cities sebagai list of {key: "..."}
 GEO_TARGETS = {
-    "KL & Selangor": {"regions": [2549, 2547]},
-    "Johor Bahru": {"cities": [1562288]},
-    "Penang": {"regions": [2545]},
-    "Semua (KL/Sel/JB/Penang)": {"regions": [2549, 2547, 2545], "cities": [1562288]},
+    "KL & Selangor": {"regions": [{"key": "2549"}, {"key": "2547"}]},
+    "Johor Bahru": {"cities": [{"key": "1562288"}]},
+    "Penang": {"regions": [{"key": "2545"}]},
+    "Semua (KL/Sel/JB/Penang)": {"regions": [{"key": "2549"}, {"key": "2547"}, {"key": "2545"}],
+                                  "cities": [{"key": "1562288"}]},
 }
-INTEREST_REAL_ESTATE = 6002979192120
-AGE_RANGE = {"min": 25, "max": 45}
+# Pilihan interest (id -> label)
+INTEREST_OPTIONS = {
+    "Real Estate": 6002979192120,
+    "Property (industry)": 6003578086487,
+    "First-time buyer (property)": 6003174415534,
+    "Property investing": 6003446239080,
+    "Mortgage loans": 6003141785766,
+    "Apartment block (property)": 6003435139283,
+    "Tiada (broad)": None,
+}
+AGE_OPTIONS = {
+    "18-24": (18, 24),
+    "25-34": (25, 34),
+    "25-45": (25, 45),
+    "35-44": (35, 44),
+    "45-54": (45, 54),
+    "55+": (55, 65),
+    "Semua (18-65)": (18, 65),
+}
+DEFAULT_INTEREST = "Real Estate"
+DEFAULT_AGE = "25-45"
+
+# Pilihan objective + optimization_goal yang sepadan
+# VERIFIED (Aug 2026): FB tolak ENGAGEMENT/LEADS optimization bila promoted_object
+# page_id (error "Performance goal isn't available" 2490408). TRAFFIC + AWARENESS
+# berfungsi penuh (campaign -> adset -> creative -> ad, semua step lulus).
+OBJECTIVE_OPTIONS = {
+    "Traffic (klik link)": {"objective": "OUTCOME_TRAFFIC", "optimization": "LINK_CLICKS"},
+    "Reach (jangkauan)": {"objective": "OUTCOME_AWARENESS", "optimization": "REACH"},
+}
+DEFAULT_OBJECTIVE = "Traffic (klik link)"
+
+
+def _post_label(post_id: str, token: str, max_len: int = 42) -> str:
+    """Nama cantik untuk campaign/adset/ad: 'Boost: <message post>'.
+
+    Tarik message post dari FB — guna user token, fallback ke page token
+    (page post message perlu page token / pages_read_engagement). Fallback
+    akhir: 'Boost <post_id>'.
+    """
+    candidates = [token]
+    try:
+        pt = db.get_token("fb_page_token")
+        if pt and pt != token:
+            candidates.append(pt)
+    except Exception:
+        pass
+    for tok in candidates:
+        try:
+            d = _graph(f"{post_id}", tok, params={"fields": "message"}, method="GET")
+            msg = (d.get("message") or d.get("name") or "").strip().replace("\n", " ")
+            if msg:
+                return f"Boost: {msg[:max_len]}{'…' if len(msg) > max_len else ''}"
+        except Exception:
+            continue
+    return f"Boost {post_id}"
 
 
 def create_boost(post_id: str, daily_budget_rm: float, days: int,
-                 area: str = "Semua (KL/Sel/JB/Penang)", token=None):
+                 area: str = "Semua (KL/Sel/JB/Penang)",
+                 age_range: str = DEFAULT_AGE,
+                 interest: str = DEFAULT_INTEREST,
+                 objective: str = DEFAULT_OBJECTIVE,
+                 status: str = "ACTIVE",
+                 token=None):
     """Create a boosted-post campaign: campaign -> adset -> creative -> ad.
 
+    status="PAUSED" untuk dry-run (test tanpa keluar duit).
     Returns {"ok": True, "campaign_id", "adset_id", "ad_id", "post_id"}.
     """
     if token is None:
@@ -269,37 +352,56 @@ def create_boost(post_id: str, daily_budget_rm: float, days: int,
     act_id = accts[0]["id"]
 
     geo = GEO_TARGETS.get(area, GEO_TARGETS["Semua (KL/Sel/JB/Penang)"])
+    age_min, age_max = AGE_OPTIONS.get(age_range, AGE_OPTIONS[DEFAULT_AGE])
+    # interest: nama preset ATAU id FB terus (angka) — flexible
+    interest_raw = (interest or "").strip()
+    interest_id = None
+    if interest_raw and interest_raw != "Tiada (broad)":
+        if interest_raw.isdigit():
+            interest_id = interest_raw
+        else:
+            interest_id = INTEREST_OPTIONS.get(interest_raw)
+            if interest_id is None:
+                # bukan preset — cuba cari id via search (fallback)
+                return {"ok": False,
+                        "error": f"Interest '{interest_raw}' tak dikenali. Pilih dari senarai "
+                                 "atau taip dan cari interest dulu."}
     targeting = {
         "geo_locations": geo,
-        "age_min": AGE_RANGE["min"],
-        "age_max": AGE_RANGE["max"],
-        "interests": [{"id": str(INTEREST_REAL_ESTATE)}],
+        "age_min": age_min,
+        "age_max": age_max,
+        "targeting_automation": {"advantage_audience": 0},
     }
+    if interest_id:
+        targeting["interests"] = [{"id": str(interest_id)}]
     budget = max(int(round(daily_budget_rm * 100)), 100)  # FB guna sen (min RM1)
-    name_base = f"Boost {post_id}"
+    name_base = _post_label(post_id, token)  # "Boost: <message>" — bukan id mentah
+    obj = OBJECTIVE_OPTIONS.get(objective, OBJECTIVE_OPTIONS[DEFAULT_OBJECTIVE])
 
     try:
         # 1) Campaign
         camp = _graph(act_id + "/campaigns", token, params={
             "name": name_base,
-            "objective": "OUTCOME_ENGAGEMENT",
-            "status": "ACTIVE",
+            "objective": obj["objective"],
+            "status": status,
             "special_ad_categories": "[]",
+            "is_adset_budget_sharing_enabled": "false",
         }, method="POST")
         camp_id = camp.get("id")
         if not camp_id:
             return {"ok": False, "error": f"Campaign gagal: {camp}"}
-        # 2) AdSet
+        # 2) AdSet — promoted_object page_id (boost page post; perlu pages_manage_ads)
         adset = _graph(act_id + "/adsets", token, params={
             "name": name_base + " set",
             "campaign_id": camp_id,
             "billing_event": "IMPRESSIONS",
-            "optimization_goal": "POST_ENGAGEMENT",
+            "optimization_goal": obj["optimization"],
             "bid_strategy": "LOWEST_COST_WITHOUT_CAP",
             "daily_budget": str(budget),
             "targeting": json.dumps(targeting),
-            "status": "ACTIVE",
+            "status": status,
             "start_time": datetime.now(timezone.utc).isoformat(),
+            "promoted_object": json.dumps({"page_id": config.PAGE_ID}),
         }, method="POST")
         adset_id = adset.get("id")
         if not adset_id:
@@ -318,7 +420,7 @@ def create_boost(post_id: str, daily_budget_rm: float, days: int,
             "name": name_base + " ad",
             "adset_id": adset_id,
             "creative": json.dumps({"creative_id": creative_id}),
-            "status": "ACTIVE",
+            "status": status,
         }, method="POST")
         ad_id = ad.get("id")
         if not ad_id:
@@ -328,7 +430,8 @@ def create_boost(post_id: str, daily_budget_rm: float, days: int,
         camps = json.loads(db.get_setting("ad_campaigns", "[]") or "[]")
         camps.append({
             "campaign_id": camp_id, "adset_id": adset_id, "ad_id": ad_id,
-            "post_id": post_id, "area": area,
+            "post_id": post_id, "area": area, "age_range": age_range,
+            "interest": interest, "objective": objective,
             "daily_budget_rm": daily_budget_rm, "days": days,
             "created_at": datetime.now(timezone.utc).isoformat(),
         })
