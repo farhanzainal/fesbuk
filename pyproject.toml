@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fesbuk"
+version = "0.1.0"
+description = "Global Facebook Page integration: post, test, read via Graph API (any page)."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+fesbuk-test = "fesbuk.fb_test:main"
+fesbuk-post = "fesbuk.fb_post:main"
+fesbuk-read = "fesbuk.fb_read:main"
+fesbuk-setup = "fesbuk.fb_setup:main"
+fesbuk-dashboard = "fesbuk.dashboard:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q"

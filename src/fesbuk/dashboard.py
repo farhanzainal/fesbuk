@@ -1,0 +1,940 @@
+# -*- coding: utf-8 -*-
+"""fesbuk local dashboard — http://127.0.0.1:8769/dashboard
+
+White theme + sidebar + glassmorphism cards.
+Header: connected FB pages + live status.
+Body  : stat cards, pending/scheduled posts (SQLite), recent posted.
+"""
+import json
+import urllib.request
+import urllib.parse
+from datetime import datetime
+
+from flask import Flask, jsonify, render_template_string, request, redirect
+from datetime import datetime, timedelta
+
+import config
+import db
+
+app = Flask(__name__)
+
+
+@app.template_filter("fmtdate")
+def fmtdate(iso_str):
+    """'2026-08-08T04:03:08+00:00' -> '08 Aug 2026 12:03 PM' (Malaysia time, UTC+8)."""
+    if not iso_str:
+        return "-"
+    try:
+        dt = datetime.fromisoformat(str(iso_str).replace("Z", "+00:00"))
+        dt = dt + timedelta(hours=8)  # UTC -> MYT
+        return dt.strftime("%d %b %Y %I:%M %p")
+    except Exception:
+        return str(iso_str)[:16]
+
+
+@app.template_filter("fmtlocal")
+def fmtlocal(iso_str):
+    """UTC ISO -> 'YYYY-MM-DDTHH:MM' waktu Malaysia (untuk input datetime-local)."""
+    if not iso_str:
+        return ""
+    try:
+        dt = datetime.fromisoformat(str(iso_str).replace("Z", "+00:00"))
+        dt = dt + timedelta(hours=8)  # UTC -> MYT
+        return dt.strftime("%Y-%m-%dT%H:%M")
+    except Exception:
+        return str(iso_str)[:16]
+
+HTML = """<!doctype html>
+<html lang="ms">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fesbuk · Dashboard</title>
+<style>
+  :root {
+    --ink:#1a2332; --muted:#6b7a90; --line:rgba(255,255,255,.55);
+    --accent:#4f6ef7; --accent2:#7c5cf0; --good:#16a34a; --warn:#d97706; --bad:#dc2626;
+  }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body {
+    font-family:'Segoe UI', system-ui, -apple-system, sans-serif;
+    background:linear-gradient(135deg,#eef2ff 0%,#f8fafc 45%,#e0e7ff 100%);
+    min-height:100vh; color:var(--ink); display:flex;
+  }
+  /* ---------- SIDEBAR ---------- */
+  .sidebar {
+    width:240px; min-height:100vh; padding:22px 16px; position:sticky; top:0;
+    background:rgba(255,255,255,.55); backdrop-filter:blur(16px); -webkit-backdrop-filter:blur(16px);
+    border-right:1px solid var(--line);
+  }
+  .logo { display:flex; align-items:center; gap:10px; padding:4px 8px 20px; font-size:20px; font-weight:800; }
+  .logo .dot { width:14px; height:14px; border-radius:6px; background:linear-gradient(135deg,var(--accent),var(--accent2)); box-shadow:0 4px 10px rgba(79,110,247,.4); }
+  .nav { display:flex; flex-direction:column; gap:6px; }
+  .nav a {
+    display:flex; align-items:center; gap:10px; padding:10px 12px; border-radius:12px;
+    color:var(--muted); text-decoration:none; font-size:14px; font-weight:600; transition:.15s;
+  }
+  .nav a:hover { background:rgba(255,255,255,.7); color:var(--ink); }
+  .nav a.active { background:#fff; color:var(--accent); box-shadow:0 4px 14px rgba(30,40,90,.08); }
+  .side-foot { margin-top:34px; padding:12px; border-radius:14px; background:rgba(255,255,255,.5); font-size:12px; color:var(--muted); }
+  /* ---------- MAIN ---------- */
+  .main { flex:1; padding:28px 34px; max-width:1100px; }
+  .top { display:flex; justify-content:space-between; align-items:center; margin-bottom:24px; }
+  .top h1 { font-size:24px; font-weight:800; }
+  .top .sub { color:var(--muted); font-size:13px; margin-top:2px; }
+  .pill { padding:6px 14px; border-radius:20px; font-size:12px; font-weight:700; background:rgba(255,255,255,.7); border:1px solid var(--line); }
+  /* ---------- GLASS CARDS ---------- */
+  .glass {
+    background:rgba(255,255,255,.55); backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
+    border:1px solid var(--line); border-radius:18px; box-shadow:0 8px 28px rgba(30,40,90,.07);
+    padding:18px 20px;
+  }
+  .stats { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-bottom:20px; }
+  .stat { padding:16px 18px; }
+  .stat .v { font-size:28px; font-weight:800; }
+  .stat .l { font-size:12px; color:var(--muted); font-weight:600; margin-top:2px; }
+  .stat .i { font-size:18px; margin-bottom:6px; }
+  .badge { padding:4px 11px; border-radius:20px; font-size:11px; font-weight:700; }
+  .badge.live { background:#dcfce7; color:var(--good); }
+  .badge.dead { background:#fee2e2; color:var(--bad); }
+  .st-pending { color:var(--warn); font-weight:700; }
+  .st-posted { color:var(--good); font-weight:700; }
+  h2 { font-size:14px; font-weight:800; text-transform:uppercase; letter-spacing:1px; color:var(--muted); margin:26px 0 10px; }
+  .page { display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; }
+  .page .name { font-weight:700; font-size:14px; }
+  .page .id { color:var(--muted); font-size:12px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th { text-align:left; color:var(--muted); font-weight:700; padding:8px 10px; border-bottom:1px solid rgba(30,40,90,.08); font-size:11px; text-transform:uppercase; letter-spacing:.5px; }
+  td { padding:9px 10px; border-bottom:1px solid rgba(30,40,90,.05); vertical-align:top; }
+  .preview { color:#44506b; max-width:400px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  a { color:var(--accent); text-decoration:none; }
+  .foot { color:var(--muted); font-size:12px; margin-top:24px; }
+  .empty { color:var(--muted); font-size:13px; padding:6px 0; }
+</style>
+</head>
+<body>
+
+<aside class="sidebar">
+  <div class="logo"><span class="dot"></span> fesbuk</div>
+  <nav class="nav">
+    <a class="active" href="/dashboard">📊 Dashboard</a>
+    <a href="/post">📝 Post</a>
+    <a href="/pages">📄 Pages</a>
+  </nav>
+  <div class="side-foot">
+    token: <b>{{ 'OK' if token_ok else 'MISSING' }}</b><br>
+    page: <b>{{ config_page or '-' }}</b><br>
+    v0.1.0
+  </div>
+</aside>
+
+<main class="main">
+  <div class="top">
+    <div>
+      <h1>Dashboard</h1>
+      <div class="sub">{{ now }} · fesbuk Facebook integration</div>
+    </div>
+    <span class="pill">{{ pages|length }} page(s)</span>
+  </div>
+
+  <div class="stats">
+    <div class="glass stat"><div class="i">📄</div><div class="v">{{ pages|length }}</div><div class="l">Pages Connected</div></div>
+    <div class="glass stat"><div class="i">🟢</div><div class="v">{{ live_count }}</div><div class="l">Pages Live</div></div>
+    <div class="glass stat"><div class="i">⏳</div><div class="v">{{ pending|length }}</div><div class="l">Pending Posts</div></div>
+    <div class="glass stat"><div class="i">✅</div><div class="v">{{ posted|length }}</div><div class="l">Posted</div></div>
+  </div>
+
+  <h2>Pages</h2>
+  <div class="glass">
+    {% for p in pages %}
+    <div class="page">
+      <div>
+        <div class="name">{{ p.name }}</div>
+        <div class="id">{{ p.id }}{% if p.page_id and p.page_id != p.id %} · config PAGE_ID={{ p.page_id }}{% endif %}</div>
+      </div>
+      <span class="badge {{ 'live' if p.live else 'dead' }}">{{ 'LIVE' if p.live else 'OFFLINE' }}</span>
+    </div>
+    {% else %}
+    <div class="empty">Tiada page dijumpai. Pastikan token user ada akses pages_show_list.</div>
+    {% endfor %}
+  </div>
+
+  <div class="foot">fesbuk v0.1.0</div>
+</main>
+
+</body>
+</html>"""
+
+POST_HTML = """<!doctype html>
+<html lang="ms">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fesbuk · Post</title>
+<style>
+  :root { --ink:#1a2332; --muted:#6b7a90; --line:rgba(255,255,255,.55); --accent:#4f6ef7; --accent2:#7c5cf0; --good:#16a34a; --warn:#d97706; --bad:#dc2626; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:'Segoe UI', system-ui, sans-serif; background:linear-gradient(135deg,#eef2ff 0%,#f8fafc 45%,#e0e7ff 100%); min-height:100vh; color:var(--ink); display:flex; }
+  .sidebar { width:240px; min-height:100vh; padding:22px 16px; position:sticky; top:0; background:rgba(255,255,255,.55); backdrop-filter:blur(16px); border-right:1px solid var(--line); }
+  .logo { display:flex; align-items:center; gap:10px; padding:4px 8px 20px; font-size:20px; font-weight:800; }
+  .logo .dot { width:14px; height:14px; border-radius:6px; background:linear-gradient(135deg,var(--accent),var(--accent2)); box-shadow:0 4px 10px rgba(79,110,247,.4); }
+  .nav { display:flex; flex-direction:column; gap:6px; }
+  .nav a { display:flex; align-items:center; gap:10px; padding:10px 12px; border-radius:12px; color:var(--muted); text-decoration:none; font-size:14px; font-weight:600; transition:.15s; }
+  .nav a:hover { background:rgba(255,255,255,.7); color:var(--ink); }
+  .nav a.active { background:#fff; color:var(--accent); box-shadow:0 4px 14px rgba(30,40,90,.08); }
+  .side-foot { margin-top:34px; padding:12px; border-radius:14px; background:rgba(255,255,255,.5); font-size:12px; color:var(--muted); }
+  .main { flex:1; padding:28px 34px; max-width:1100px; }
+  .top { display:flex; justify-content:space-between; align-items:center; margin-bottom:24px; }
+  .top h1 { font-size:24px; font-weight:800; }
+  .top .sub { color:var(--muted); font-size:13px; margin-top:2px; }
+  .glass { background:rgba(255,255,255,.55); backdrop-filter:blur(14px); border:1px solid var(--line); border-radius:18px; box-shadow:0 8px 28px rgba(30,40,90,.07); padding:18px 20px; }
+  .toolbar { display:flex; justify-content:space-between; align-items:center; margin-bottom:14px; gap:12px; }
+  .search { display:flex; gap:8px; }
+  .search input { padding:9px 14px; border-radius:12px; border:1px solid rgba(30,40,90,.12); background:#fff; font-size:13px; width:240px; outline:none; }
+  .search input:focus { border-color:var(--accent); }
+  .btn { padding:9px 16px; border-radius:12px; border:none; background:linear-gradient(135deg,var(--accent),var(--accent2)); color:#fff; font-weight:700; font-size:13px; cursor:pointer; }
+  .st-pending { color:var(--warn); font-weight:700; } .st-posted { color:var(--good); font-weight:700; }
+  .badge-src { display:inline-block; padding:3px 10px; border-radius:20px; font-size:11px; font-weight:700; white-space:nowrap; }
+  .badge-src.user { background:#e0e7ff; color:#4338ca; }
+  .badge-src.bot { background:#f3e8ff; color:#7e22ce; }
+  .btn.mini { padding:6px 9px; font-size:13px; border-radius:10px; text-decoration:none; display:inline-flex; align-items:center; justify-content:center; line-height:1; border:1px solid rgba(30,40,90,.1); background:#fff; color:var(--muted); cursor:pointer; transition:.15s; }
+  .btn.mini:hover { background:#eef2ff; color:var(--accent); border-color:var(--accent); }
+  .row-actions { display:flex; gap:5px; align-items:center; white-space:nowrap; }
+  .row-actions form { display:inline; }
+  /* ---- analysis modal ---- */
+  .modal-overlay { position:fixed; inset:0; background:rgba(15,23,42,.45); backdrop-filter:blur(4px); display:flex; align-items:center; justify-content:center; z-index:100; }
+  .modal { background:#fff; border-radius:18px; box-shadow:0 20px 60px rgba(15,23,42,.25); width:460px; max-width:92vw; overflow:hidden; }
+  .modal-head { display:flex; justify-content:space-between; align-items:center; padding:16px 20px; font-weight:800; font-size:15px; border-bottom:1px solid rgba(30,40,90,.08); }
+  .modal-x { border:none; background:#f1f5fb; color:var(--muted); width:30px; height:30px; border-radius:10px; cursor:pointer; font-size:13px; font-weight:700; }
+  .modal-x:hover { background:#e2e8f0; color:var(--ink); }
+  .modal-body { padding:20px; }
+  .stat-grid { display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px; }
+  .stat-card { background:#f8fafc; border:1px solid rgba(30,40,90,.07); border-radius:14px; padding:14px 10px; text-align:center; }
+  .stat-card .v { font-size:20px; font-weight:800; color:var(--accent); }
+  .stat-card .l { font-size:11px; color:var(--muted); font-weight:600; margin-top:3px; }
+  .modal-foot { margin-top:16px; text-align:right; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th { text-align:left; color:var(--muted); font-weight:700; padding:8px 10px; border-bottom:1px solid rgba(30,40,90,.08); font-size:11px; text-transform:uppercase; letter-spacing:.5px; }
+  td { padding:9px 10px; border-bottom:1px solid rgba(30,40,90,.05); vertical-align:top; }
+  .preview { color:#44506b; max-width:380px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  a { color:var(--accent); text-decoration:none; }
+  .pager { display:flex; justify-content:space-between; align-items:center; margin-top:16px; font-size:13px; color:var(--muted); }
+  .pager .pages a { margin-left:8px; padding:6px 12px; border-radius:10px; background:#fff; border:1px solid rgba(30,40,90,.1); }
+  .empty { color:var(--muted); font-size:13px; padding:6px 0; }
+</style>
+</head>
+<body>
+
+<aside class="sidebar">
+  <div class="logo"><span class="dot"></span> fesbuk</div>
+  <nav class="nav">
+    <a href="/dashboard">📊 Dashboard</a>
+    <a class="active" href="/post">📝 Post</a>
+    <a href="/pages">📄 Pages</a>
+  </nav>
+  <div class="side-foot">token: <b>{{ 'OK' if token_ok else 'MISSING' }}</b><br>page: <b>{{ config_page or '-' }}</b><br>v0.1.0</div>
+</aside>
+
+<main class="main">
+  <div class="top">
+    <div>
+      <h1>Post</h1>
+      <div class="sub">{{ total }} rekod · page {{ page }} dari {{ total_pages }}</div>
+    </div>
+  </div>
+
+  <div style="display:flex;justify-content:flex-end;margin-bottom:16px;">
+    <a href="/post/new" class="btn" style="text-decoration:none;padding:11px 20px;font-size:14px;">➕ Tambah Post</a>
+  </div>
+
+  <div class="glass">
+    <div class="toolbar">
+      <form class="search" method="get" action="/post">
+        <input type="text" name="q" value="{{ q }}" placeholder="Cari post...">
+        <button class="btn" type="submit">Cari</button>
+        {% if q %}<a href="/post" style="align-self:center">✕ clear</a>{% endif %}
+      </form>
+    </div>
+    {% if posts %}
+    <table>
+      <tr><th>#</th><th>Date Created</th><th>Posted</th><th>Scheduled</th><th>By</th><th>Preview</th><th>Status</th><th>FB post</th><th>Actions</th></tr>
+      {% for p in posts %}
+      <tr>
+        <td>{{ p.id }}</td>
+        <td>{{ p.created_at | fmtdate }}</td>
+        <td>{{ p.posted_at | fmtdate }}</td>
+        <td>{{ p.scheduled_at | fmtdate }}</td>
+        <td>{% if p.msg_file and p.msg_file.startswith('manual_') %}<span class="badge-src user">👤 User</span>{% else %}<span class="badge-src bot">🤖 Bot</span>{% endif %}</td>
+        <td class="preview">{% if p.image %}🖼️ {% endif %}{{ p.text }}</td>
+        <td class="st-{{ p.status }}">{{ p.status }}</td>
+        <td>{% if p.fb_post_id %}<a href="https://www.facebook.com/{{ p.fb_post_id }}">link</a>{% else %}-{% endif %}</td>
+        <td class="row-actions">
+          <a class="btn mini" href="/post/{{ p.id }}/edit" title="Edit">✏️</a>
+          <form method="post" action="/post/{{ p.id }}/delete" onsubmit="return confirm('Buang post #{{ p.id }} ni? Tindakan ni tak boleh undo.');">
+            <button class="btn mini" type="submit" title="Buang">🗑️</button>
+          </form>
+          {% if p.status == 'pending' %}
+          <form method="post" action="/post/{{ p.id }}/publish">
+            <button class="btn mini" type="submit" title="Post sekarang">🚀</button>
+          </form>
+          {% endif %}
+          {% if p.fb_post_id %}
+          <button class="btn mini" type="button" title="Analisis" data-pid="{{ p.id }}" data-fbid="{{ p.fb_post_id }}" onclick="showAnalysis(this)">📊</button>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </table>
+    <div class="pager">
+      <span>{{ total }} rekod</span>
+      <span class="pages">
+        {% if page > 1 %}<a href="/post?page={{ page - 1 }}{% if q %}&q={{ q }}{% endif %}">← Prev</a>{% endif %}
+        <span>{{ page }} / {{ total_pages }}</span>
+        {% if page < total_pages %}<a href="/post?page={{ page + 1 }}{% if q %}&q={{ q }}{% endif %}">Next →</a>{% endif %}
+      </span>
+    </div>
+    {% else %}<div class="empty">Tiada post dijumpai. 😎</div>{% endif %}
+  </div>
+
+  <div class="foot" style="color:var(--muted);font-size:12px;margin-top:20px;">fesbuk v0.1.0</div>
+</main>
+
+<div class="modal-overlay" id="analysisModal" style="display:none;" onclick="if(event.target===this)closeAnalysis()">
+  <div class="modal">
+    <div class="modal-head">
+      <span>📊 Analisis Post</span>
+      <button class="modal-x" onclick="closeAnalysis()">✕</button>
+    </div>
+    <div class="modal-body" id="analysisBody"><div class="empty">Memuat data...</div></div>
+  </div>
+</div>
+
+<script>
+function showAnalysis(btn) {
+  var pid = btn.getAttribute('data-pid');
+  var fbId = btn.getAttribute('data-fbid');
+  document.getElementById('analysisModal').style.display = 'flex';
+  document.getElementById('analysisBody').innerHTML = '<div class="empty">Memuat data dari Facebook...</div>';
+  fetch('/api/post/' + pid + '/analysis')
+    .then(r => r.json())
+    .then(d => {
+      if (d.error) { document.getElementById('analysisBody').innerHTML = '<div class="empty" style="color:var(--bad)">⚠️ ' + d.error + '</div>'; return; }
+      var n = function(v) { return (v === null || v === undefined) ? '—' : v; };
+      var note = d.insights_ok ? '' : '<div class="empty" style="margin-top:12px;">💡 Views/Reach perlukan permission <code>read_insights</code> pada token — regenerate token kat Graph API Explorer untuk dapat data tu.</div>';
+      document.getElementById('analysisBody').innerHTML =
+        '<div class="stat-grid">' +
+        '<div class="stat-card"><div class="v">' + n(d.views) + '</div><div class="l">👁️ Views</div></div>' +
+        '<div class="stat-card"><div class="v">' + n(d.reach) + '</div><div class="l">📡 Reach</div></div>' +
+        '<div class="stat-card"><div class="v">' + n(d.reactions) + '</div><div class="l">👍 Reactions</div></div>' +
+        '<div class="stat-card"><div class="v">' + n(d.comments) + '</div><div class="l">💬 Komen</div></div>' +
+        '<div class="stat-card"><div class="v">' + n(d.shares) + '</div><div class="l">🔁 Share</div></div>' +
+        '<div class="stat-card"><div class="v">' + n(d.engaged) + '</div><div class="l">🎯 Engaged</div></div>' +
+        '</div>' + note +
+        '<div class="modal-foot"><a class="btn" target="_blank" href="https://www.facebook.com/' + fbId + '">Buka di Facebook →</a></div>';
+    })
+    .catch(e => document.getElementById('analysisBody').innerHTML = '<div class="empty" style="color:var(--bad)">⚠️ Gagal: ' + e + '</div>');
+}
+function closeAnalysis() { document.getElementById('analysisModal').style.display = 'none'; }
+</script>
+
+</body>
+</html>"""
+
+PAGES_HTML = """<!doctype html>
+<html lang="ms">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fesbuk · Pages</title>
+<style>
+  :root { --ink:#1a2332; --muted:#6b7a90; --line:rgba(255,255,255,.55); --accent:#4f6ef7; --accent2:#7c5cf0; --good:#16a34a; --warn:#d97706; --bad:#dc2626; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:'Segoe UI', system-ui, sans-serif; background:linear-gradient(135deg,#eef2ff 0%,#f8fafc 45%,#e0e7ff 100%); min-height:100vh; color:var(--ink); display:flex; }
+  .sidebar { width:240px; min-height:100vh; padding:22px 16px; position:sticky; top:0; background:rgba(255,255,255,.55); backdrop-filter:blur(16px); border-right:1px solid var(--line); }
+  .logo { display:flex; align-items:center; gap:10px; padding:4px 8px 20px; font-size:20px; font-weight:800; }
+  .logo .dot { width:14px; height:14px; border-radius:6px; background:linear-gradient(135deg,var(--accent),var(--accent2)); box-shadow:0 4px 10px rgba(79,110,247,.4); }
+  .nav { display:flex; flex-direction:column; gap:6px; }
+  .nav a { display:flex; align-items:center; gap:10px; padding:10px 12px; border-radius:12px; color:var(--muted); text-decoration:none; font-size:14px; font-weight:600; transition:.15s; }
+  .nav a:hover { background:rgba(255,255,255,.7); color:var(--ink); }
+  .nav a.active { background:#fff; color:var(--accent); box-shadow:0 4px 14px rgba(30,40,90,.08); }
+  .side-foot { margin-top:34px; padding:12px; border-radius:14px; background:rgba(255,255,255,.5); font-size:12px; color:var(--muted); }
+  .main { flex:1; padding:28px 34px; max-width:900px; }
+  .top { display:flex; justify-content:space-between; align-items:center; margin-bottom:24px; }
+  .top h1 { font-size:24px; font-weight:800; }
+  .top .sub { color:var(--muted); font-size:13px; margin-top:2px; }
+  .glass { background:rgba(255,255,255,.55); backdrop-filter:blur(14px); border:1px solid var(--line); border-radius:18px; box-shadow:0 8px 28px rgba(30,40,90,.07); padding:18px 20px; }
+  .page { display:flex; align-items:center; justify-content:space-between; padding:12px 4px; border-bottom:1px solid rgba(30,40,90,.06); }
+  .page:last-child { border-bottom:none; }
+  .page .name { font-weight:700; font-size:14px; }
+  .page .id { color:var(--muted); font-size:12px; }
+  .badge { padding:4px 11px; border-radius:20px; font-size:11px; font-weight:700; }
+  .badge.live { background:#dcfce7; color:var(--good); }
+  .badge.dead { background:#fee2e2; color:var(--bad); }
+  .badge.hid { background:#fef3c7; color:var(--warn); }
+  .btn { padding:7px 14px; border-radius:12px; border:none; background:linear-gradient(135deg,var(--accent),var(--accent2)); color:#fff; font-weight:700; font-size:12px; cursor:pointer; }
+  .btn.ghost { background:#fff; color:var(--muted); border:1px solid rgba(30,40,90,.12); }
+  .empty { color:var(--muted); font-size:13px; padding:6px 0; }
+  .foot { color:var(--muted); font-size:12px; margin-top:24px; }
+</style>
+</head>
+<body>
+
+<aside class="sidebar">
+  <div class="logo"><span class="dot"></span> fesbuk</div>
+  <nav class="nav">
+    <a href="/dashboard">📊 Dashboard</a>
+    <a href="/post">📝 Post</a>
+    <a class="active" href="/pages">📄 Pages</a>
+  </nav>
+  <div class="side-foot">token: <b>{{ 'OK' if token_ok else 'MISSING' }}</b><br>page: <b>{{ config_page or '-' }}</b><br>v0.1.0</div>
+</aside>
+
+<main class="main">
+  <div class="top">
+    <div>
+      <h1>Pages</h1>
+      <div class="sub">{{ now }} · page yang connected dengan token</div>
+    </div>
+  </div>
+
+  <div class="glass">
+    {% for p in pages %}
+    <div class="page">
+      <div>
+        <div class="name">{{ p.name }} {% if p.hidden %}<span class="badge hid">HIDDEN</span>{% endif %}</div>
+        <div class="id">{{ p.id }}{% if p.page_id and p.page_id == p.id %} · config{% endif %}</div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <span class="badge {{ 'live' if p.live else 'dead' }}">{{ 'LIVE' if p.live else 'OFFLINE' }}</span>
+        <form method="post" action="/pages/toggle/{{ p.id }}" style="display:inline;">
+          <button class="btn {{ 'ghost' if not p.hidden }}" type="submit">{{ 'Show' if p.hidden else 'Hide' }}</button>
+        </form>
+      </div>
+    </div>
+    {% else %}
+    <div class="empty">Tiada page dijumpai. Pastikan token user ada akses pages_show_list.</div>
+    {% endfor %}
+  </div>
+
+  <div class="foot">Page yang di-hide tak akan muncul dalam Dashboard, tapi kekal dalam senarai ini untuk di-show balik.</div>
+</main>
+
+</body>
+</html>"""
+
+NEW_POST_HTML = """<!doctype html>
+<html lang="ms">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fesbuk · Tambah Post</title>
+<style>
+  :root { --ink:#1a2332; --muted:#6b7a90; --line:rgba(255,255,255,.55); --accent:#4f6ef7; --accent2:#7c5cf0; --good:#16a34a; --warn:#d97706; --bad:#dc2626; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:'Segoe UI', system-ui, sans-serif; background:linear-gradient(135deg,#eef2ff 0%,#f8fafc 45%,#e0e7ff 100%); min-height:100vh; color:var(--ink); display:flex; }
+  .sidebar { width:240px; min-height:100vh; padding:22px 16px; position:sticky; top:0; background:rgba(255,255,255,.55); backdrop-filter:blur(16px); border-right:1px solid var(--line); }
+  .logo { display:flex; align-items:center; gap:10px; padding:4px 8px 20px; font-size:20px; font-weight:800; }
+  .logo .dot { width:14px; height:14px; border-radius:6px; background:linear-gradient(135deg,var(--accent),var(--accent2)); box-shadow:0 4px 10px rgba(79,110,247,.4); }
+  .nav { display:flex; flex-direction:column; gap:6px; }
+  .nav a { display:flex; align-items:center; gap:10px; padding:10px 12px; border-radius:12px; color:var(--muted); text-decoration:none; font-size:14px; font-weight:600; transition:.15s; }
+  .nav a:hover { background:rgba(255,255,255,.7); color:var(--ink); }
+  .nav a.active { background:#fff; color:var(--accent); box-shadow:0 4px 14px rgba(30,40,90,.08); }
+  .side-foot { margin-top:34px; padding:12px; border-radius:14px; background:rgba(255,255,255,.5); font-size:12px; color:var(--muted); }
+  .main { flex:1; padding:28px 34px; max-width:720px; }
+  .top { display:flex; justify-content:space-between; align-items:center; margin-bottom:24px; }
+  .top h1 { font-size:24px; font-weight:800; }
+  .top .sub { color:var(--muted); font-size:13px; margin-top:2px; }
+  .glass { background:rgba(255,255,255,.55); backdrop-filter:blur(14px); border:1px solid var(--line); border-radius:18px; box-shadow:0 8px 28px rgba(30,40,90,.07); padding:22px 24px; }
+  label { font-size:12px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; display:block; margin:16px 0 6px; }
+  input[type=text], textarea, select, input[type=datetime-local] {
+    width:100%; padding:10px 14px; border-radius:12px; border:1px solid rgba(30,40,90,.12);
+    background:#fff; font-size:14px; font-family:inherit; outline:none;
+  }
+  input:focus, textarea:focus, select:focus { border-color:var(--accent); }
+  textarea { resize:vertical; min-height:140px; }
+  .row { display:flex; gap:14px; }
+  .row > div { flex:1; }
+  /* ---- image dropzone ---- */
+  .dropzone { position:relative; border:2px dashed rgba(79,110,247,.35); border-radius:16px; background:rgba(255,255,255,.6); padding:34px 20px; text-align:center; cursor:pointer; transition:.2s; }
+  .dropzone:hover, .dropzone.drag { border-color:var(--accent); background:rgba(79,110,247,.06); }
+  .dropzone .dz-icon { font-size:34px; line-height:1; }
+  .dropzone .dz-title { font-weight:700; font-size:14px; margin-top:8px; }
+  .dropzone .dz-sub { color:var(--muted); font-size:12px; margin-top:3px; }
+  .dropzone .dz-browse { color:var(--accent); font-weight:700; }
+  .dropzone input[type="file"] { position:absolute; inset:0; width:100%; height:100%; opacity:0; cursor:pointer; }
+  .dropzone.has-img { border:2px solid rgba(22,163,74,.25); background:#fff; padding:14px; cursor:default; }
+  .dropzone.has-img input[type="file"] { cursor:pointer; }
+  .dropzone .dz-preview { display:none; }
+  .dropzone.has-img .dz-preview { display:block; }
+  .dropzone.has-img .dz-empty { display:none; }
+  .dz-preview { background:#f1f5fb; border-radius:12px; padding:10px; }
+  .dz-preview img { display:block; width:100%; height:220px; object-fit:contain; border-radius:8px; }
+  .dz-meta { display:flex; align-items:center; justify-content:center; gap:10px; margin-top:10px; flex-wrap:wrap; }
+  .dz-name { font-size:12px; color:var(--muted); font-weight:600; max-width:240px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .dz-actions { display:flex; gap:8px; }
+  .dz-actions .btn { padding:6px 14px; font-size:12px; border-radius:10px; }
+  .btn.danger { background:#fee2e2; color:var(--bad); }
+  .btn.danger:hover { background:#fecaca; }
+  .modes { display:flex; gap:10px; }
+  .mode { flex:1; padding:14px; border-radius:14px; border:2px solid rgba(30,40,90,.1); background:#fff; cursor:pointer; text-align:center; font-weight:700; font-size:14px; }
+  .mode input { display:none; }
+  .mode.selected { border-color:var(--accent); background:#eef2ff; color:var(--accent); }
+  .actions { display:flex; justify-content:flex-end; gap:10px; margin-top:22px; }
+  .btn { padding:11px 22px; border-radius:12px; border:none; background:linear-gradient(135deg,var(--accent),var(--accent2)); color:#fff; font-weight:700; font-size:14px; cursor:pointer; }
+  .btn.ghost { background:#fff; color:var(--muted); border:1px solid rgba(30,40,90,.12); text-decoration:none; }
+  .note { font-size:12px; color:var(--muted); margin-top:6px; }
+  #scheduleWrap { display:none; }
+  #scheduleWrap.show { display:block; }
+</style>
+</head>
+<body>
+
+<aside class="sidebar">
+  <div class="logo"><span class="dot"></span> fesbuk</div>
+  <nav class="nav">
+    <a href="/dashboard">📊 Dashboard</a>
+    <a class="active" href="/post">📝 Post</a>
+    <a href="/pages">📄 Pages</a>
+  </nav>
+  <div class="side-foot">token: <b>{{ 'OK' if token_ok else 'MISSING' }}</b><br>page: <b>{{ config_page or '-' }}</b><br>v0.1.0</div>
+</aside>
+
+<main class="main">
+  <div class="top">
+    <div>
+      <h1>{% if post %}✏️ Edit Post #{{ post.id }}{% else %}Tambah Post{% endif %}</h1>
+      <div class="sub">{% if post %}Ubah content, gambar atau masa — lepas simpan ikut mode yang dipilih{% else %}Pilih page, tulis content, upload gambar, pilih mode{% endif %}</div>
+    </div>
+  </div>
+
+  <div class="glass">
+    <form method="post" action="{% if post %}/post/{{ post.id }}/edit{% else %}/post/new{% endif %}" enctype="multipart/form-data">
+      <label>Page</label>
+      <select name="page_id">
+        {% for p in pages %}
+        <option value="{{ p.id }}" {% if (post and post.page_id == p.id) or (not post and p.id == config_page) %}selected{% endif %}>{{ p.name }} ({{ p.id }})</option>
+        {% endfor %}
+      </select>
+
+      <label>Content</label>
+      <textarea name="text" required placeholder="Tulis content post di sini...">{{ post.text if post else '' }}</textarea>
+
+      <label>Gambar (pilihan)</label>
+      <div class="dropzone{% if post and post.image %} has-img{% endif %}" id="dz">
+        <div class="dz-empty">
+          <div class="dz-icon">🖼️</div>
+          <div class="dz-title">Tarik &amp; lepas gambar di sini</div>
+          <div class="dz-sub">atau <span class="dz-browse">klik untuk pilih</span></div>
+        </div>
+        <div class="dz-preview">
+          <img id="previewImg" alt="preview" {% if post and post.image %}src="/img/{{ post.image }}"{% endif %}>
+          <div class="dz-meta">
+            <span class="dz-name" id="dzName">{% if post and post.image %}{{ post.image }}{% endif %}</span>
+            <span class="dz-actions">
+              <button type="button" class="btn ghost" onclick="pickImage()">🔄 Tukar</button>
+              <button type="button" class="btn danger" onclick="clearImage()">🗑️ Buang</button>
+            </span>
+          </div>
+        </div>
+        <input type="file" name="image" accept="image/*" id="imageInput" onchange="previewImage(event)">
+        <input type="hidden" name="remove_image" id="removeImage" value="">
+      </div>
+
+      <label>Mode</label>
+      <div class="modes">
+        <label class="mode{% if not (post and post.scheduled_at) %} selected{% endif %}"><input type="radio" name="mode" value="instant" {% if not (post and post.scheduled_at) %}checked{% endif %} onchange="modeSel(this)">⚡ Instant Post</label>
+        <label class="mode{% if post and post.scheduled_at %} selected{% endif %}"><input type="radio" name="mode" value="schedule" {% if post and post.scheduled_at %}checked{% endif %} onchange="modeSel(this)">📅 Schedule</label>
+      </div>
+      <div id="scheduleWrap"{% if post and post.scheduled_at %} class="show"{% endif %}>
+        <label>Tarikh &amp; Masa</label>
+        <input type="datetime-local" name="scheduled_at" value="{{ post.scheduled_at | fmtlocal if post else '' }}">
+      </div>
+
+      <div class="actions">
+        <a class="btn ghost" href="/post">Batal</a>
+        <button class="btn" type="submit">🚀 Hantar</button>
+      </div>
+    </form>
+  </div>
+</main>
+
+<script>
+const dz = document.getElementById('dz');
+const input = document.getElementById('imageInput');
+
+function previewImage(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  if (!file.type.startsWith('image/')) { alert('Fail tu bukan gambar!'); e.target.value = ''; return; }
+  const url = URL.createObjectURL(file);
+  document.getElementById('previewImg').src = url;
+  document.getElementById('dzName').textContent = file.name;
+  dz.classList.add('has-img');
+}
+function pickImage() { input.click(); }
+function clearImage() {
+  input.value = '';
+  document.getElementById('removeImage').value = '1';
+  document.getElementById('previewImg').removeAttribute('src');
+  document.getElementById('dzName').textContent = '';
+  dz.classList.remove('has-img');
+}
+function modeSel(el) {
+  document.querySelectorAll('.mode').forEach(m => m.classList.remove('selected'));
+  el.closest('.mode').classList.add('selected');
+  document.getElementById('scheduleWrap').classList.toggle('show', el.value === 'schedule');
+}
+// drag & drop
+['dragenter', 'dragover'].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.add('drag'); }));
+['dragleave', 'drop'].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.remove('drag'); }));
+dz.addEventListener('drop', e => {
+  const f = e.dataTransfer.files[0];
+  if (f && f.type.startsWith('image/')) {
+    const dt = new DataTransfer(); dt.items.add(f); input.files = dt.files;
+    previewImage({ target: input });
+  }
+});
+</script>
+
+</body>
+</html>"""
+
+
+def _graph(path, token, fields=None):
+    url = f"{config.GRAPH}/{path}?" + urllib.parse.urlencode(
+        {"access_token": token, **({"fields": fields} if fields else {})}
+    )
+    req = urllib.request.Request(url)
+    with urllib.request.urlopen(req, timeout=20) as r:
+        return json.loads(r.read().decode())
+
+
+def _page_live(page_id, page_token):
+    try:
+        info = _graph(page_id, page_token, "id,name")
+        return bool(info.get("id"))
+    except Exception:
+        return False
+
+
+def connected_pages():
+    """All pages visible to the user token, with live status + hidden flag."""
+    token = None
+    for f in (config.SECRETS_DIR / "fb_user_token_ll.txt", config.SECRETS_DIR / "fb_user_token.txt"):
+        if f.exists():
+            token = f.read_text(encoding="utf-8").strip()
+            break
+    if not token:
+        return [], False
+    hidden = set(db.hidden_pages())
+    try:
+        data = _graph("me/accounts", token, "id,name,access_token")
+        pages = []
+        for p in data.get("data", []):
+            pages.append({
+                "id": p["id"],
+                "name": p.get("name", "?"),
+                "live": _page_live(p["id"], p.get("access_token", "")),
+                "hidden": p["id"] in hidden,
+                "page_id": config.PAGE_ID,
+            })
+        # Hanya page yang dikonfigurasi dalam .env (PAGE_ID) dipapar.
+        # Page lain (idahamway, Panthera, Family Frozen Food, dsb.) dibuang
+        # terus dari SEMUA paparan — dashboard, dropdown Post, halaman Pages.
+        if config.PAGE_ID:
+            pages = [p for p in pages if p["id"] == config.PAGE_ID]
+        return pages, True
+    except Exception as e:
+        return [{"id": "-", "name": f"Error: {e}", "live": False, "hidden": False}], True
+
+
+@app.route("/")
+def index():
+    return {"service": "fesbuk dashboard", "dashboard": "/dashboard"}
+
+
+@app.route("/dashboard")
+def dashboard():
+    db.seed_from_msgs()
+    pages, token_ok = connected_pages()
+    visible = [p for p in pages if not p.get("hidden")]
+    return render_template_string(
+        HTML,
+        pages=visible,
+        live_count=sum(1 for p in visible if p.get("live")),
+        pending=db.get_posts("pending"),
+        posted=db.get_posts("posted"),
+        now=datetime.now().strftime("%d %b %Y %H:%M"),
+        token_ok=token_ok,
+        config_page=config.PAGE_ID or "-",
+    )
+
+
+@app.route("/pages")
+def pages_page():
+    db.init_db()
+    pages, token_ok = connected_pages()
+    return render_template_string(
+        PAGES_HTML,
+        pages=pages,
+        now=datetime.now().strftime("%d %b %Y %H:%M"),
+        token_ok=token_ok,
+        config_page=config.PAGE_ID or "-",
+    )
+
+
+@app.route("/pages/toggle/<page_id>", methods=["POST"])
+def pages_toggle(page_id):
+    now_hidden = db.toggle_hidden_page(page_id)
+    return redirect(f"/pages?{'hidden' if now_hidden else 'shown'}=1")
+
+
+@app.route("/post", )
+def post_page():
+    db.init_db()
+    q = request.args.get("q", "").strip()
+    page = max(1, request.args.get("page", 1, type=int))
+    per_page = 10
+    posts, total = db.search_posts(q=q or None, page=page, per_page=per_page)
+    total_pages = max(1, (total + per_page - 1) // per_page)
+    return render_template_string(
+        POST_HTML,
+        posts=posts,
+        total=total,
+        total_pages=total_pages,
+        page=page,
+        q=q,
+        now=datetime.now().strftime("%d %b %Y %H:%M"),
+        token_ok=True,
+        config_page=config.PAGE_ID or "-",
+    )
+
+
+@app.route("/post/new", methods=["GET", "POST"])
+def post_new():
+    if request.method == "GET":
+        pages, token_ok = connected_pages()
+        return render_template_string(
+            NEW_POST_HTML, pages=pages, token_ok=token_ok,
+            config_page=config.PAGE_ID or "-",
+        )
+    # POST — create post
+    text = request.form.get("text", "").strip()
+    page_id = request.form.get("page_id") or config.PAGE_ID
+    mode = request.form.get("mode", "instant")
+    if not text:
+        return "ERROR: text kosong", 400
+    image = None
+    f = request.files.get("image")
+    if f and f.filename:
+        ext = f.filename.rsplit(".", 1)[-1].lower() if "." in f.filename else "jpg"
+        if ext not in ("jpg", "jpeg", "png", "webp", "gif"):
+            return "ERROR: format gambar tak disokong", 400
+        from datetime import datetime as _dt
+        name = f"{_dt.now().strftime('%Y%m%d%H%M%S')}_{f.filename.replace(' ', '_')}"
+        img_dir = db.DB_DIR / "images"
+        img_dir.mkdir(parents=True, exist_ok=True)
+        f.save(img_dir / name)
+        image = name
+    scheduled_at = None
+    if mode == "schedule":
+        s = request.form.get("scheduled_at", "").strip()
+        if not s:
+            return "ERROR: pilih tarikh & masa untuk schedule", 400
+        from datetime import datetime as _dt, timedelta as _td
+        local = _dt.fromisoformat(s)  # datetime-local = waktu Malaysia
+        scheduled_at = (local - _td(hours=8)).isoformat() + "Z"  # simpan UTC
+    pid = db.create_post(text, image, page_id, scheduled_at)
+    if mode == "instant":
+        try:
+            from fesbuk import fb_post
+        except ImportError:
+            import fb_post
+        if image:
+            result = fb_post.post_photo_file(str(db.DB_DIR / "images" / image), text, page_id)
+        else:
+            result = fb_post.post_message(text, page_id)
+        if "id" not in result:
+            return f"ERROR posting: {result}", 500
+        db.mark_posted_by_id(pid, result["id"])
+        return redirect(f"/post?posted={result['id']}")
+    return redirect(f"/post?scheduled={pid}")
+
+
+@app.route("/post/<int:pid>/publish", methods=["POST"])
+def post_publish(pid):
+    row = db.get_post_by_id(pid)
+    if not row:
+        return "ERROR: post tak jumpa", 404
+    if row["status"] == "posted":
+        return redirect("/post?already=1")
+    try:
+        from fesbuk import fb_post
+    except ImportError:
+        import fb_post
+    page_id = row.get("page_id") or config.PAGE_ID
+    if row.get("image"):
+        img_path = db.DB_DIR / "images" / row["image"]
+        result = fb_post.post_photo_file(str(img_path), row["text"], page_id)
+    else:
+        result = fb_post.post_message(row["text"], page_id)
+    if "id" not in result:
+        return f"ERROR posting: {result}", 500
+    db.mark_posted_by_id(pid, result["id"])
+    return redirect(f"/post?posted={result['id']}")
+
+
+@app.route("/post/<int:pid>/delete", methods=["POST"])
+def post_delete(pid):
+    row = db.get_post_by_id(pid)
+    if not row:
+        return "ERROR: post tak jumpa", 404
+    # buang file gambar sekali kalau ada
+    if row.get("image"):
+        img = db.DB_DIR / "images" / row["image"]
+        if img.exists():
+            try:
+                img.unlink()
+            except OSError:
+                pass
+    db.delete_post(pid)
+    return redirect("/post?deleted=1")
+
+
+@app.route("/post/<int:pid>/edit", methods=["GET", "POST"])
+def post_edit(pid):
+    row = db.get_post_by_id(pid)
+    if not row:
+        return "ERROR: post tak jumpa", 404
+    if request.method == "GET":
+        pages, token_ok = connected_pages()
+        return render_template_string(
+            NEW_POST_HTML, pages=pages, token_ok=token_ok,
+            config_page=config.PAGE_ID or "-", post=row,
+        )
+    # POST — simpan perubahan
+    text = request.form.get("text", "").strip()
+    page_id = request.form.get("page_id") or config.PAGE_ID
+    mode = request.form.get("mode", "instant")
+    if not text:
+        return "ERROR: text kosong", 400
+    image = row.get("image")
+    f = request.files.get("image")
+    if f and f.filename:
+        ext = f.filename.rsplit(".", 1)[-1].lower() if "." in f.filename else "jpg"
+        if ext not in ("jpg", "jpeg", "png", "webp", "gif"):
+            return "ERROR: format gambar tak disokong", 400
+        from datetime import datetime as _dt
+        name = f"{_dt.now().strftime('%Y%m%d%H%M%S')}_{f.filename.replace(' ', '_')}"
+        img_dir = db.DB_DIR / "images"
+        img_dir.mkdir(parents=True, exist_ok=True)
+        f.save(img_dir / name)
+        image = name  # gambar baru ganti lama (lama kekal dlm disk utk rujukan)
+    elif request.form.get("remove_image") == "1" and image:
+        # user klik "Buang" — padam gambar lama dari DB + disk
+        old = db.DB_DIR / "images" / image
+        if old.exists():
+            try:
+                old.unlink()
+            except OSError:
+                pass
+        image = None
+    scheduled_at = None
+    if mode == "schedule":
+        s = request.form.get("scheduled_at", "").strip()
+        if not s:
+            return "ERROR: pilih tarikh & masa untuk schedule", 400
+        from datetime import datetime as _dt, timedelta as _td
+        local = _dt.fromisoformat(s)
+        scheduled_at = (local - _td(hours=8)).isoformat() + "Z"
+    db.update_post(pid, text, image, page_id, scheduled_at, status="pending")
+    if mode == "instant":
+        try:
+            from fesbuk import fb_post
+        except ImportError:
+            import fb_post
+        if image:
+            result = fb_post.post_photo_file(str(db.DB_DIR / "images" / image), text, page_id)
+        else:
+            result = fb_post.post_message(text, page_id)
+        if "id" not in result:
+            return f"ERROR posting: {result}", 500
+        db.mark_posted_by_id(pid, result["id"])
+        return redirect(f"/post?posted={result['id']}")
+    return redirect(f"/post?scheduled={pid}")
+
+
+@app.route("/img/<path:name>")
+def img_file(name):
+    """Serve uploaded post image from database/images (local dashboard preview)."""
+    from flask import send_from_directory, abort
+    img_dir = db.DB_DIR / "images"
+    if not (img_dir / name).exists():
+        abort(404)
+    return send_from_directory(str(img_dir), name)
+
+
+@app.route("/api/post/<int:pid>/analysis")
+def api_post_analysis(pid):
+    """Fetch FB insights for a posted post: views, reach, comments, shares, reactions."""
+    row = db.get_post_by_id(pid)
+    if not row:
+        return jsonify({"error": "post tak jumpa"}), 404
+    if not row.get("fb_post_id"):
+        return jsonify({"error": "post belum live di FB (tiada fb_post_id)"}), 400
+    try:
+        token = config.load_token()
+        fb_id = row["fb_post_id"]
+        # normalise: photo posts simpan photo id je (cth 122094478419440123),
+        # tapi Graph API perlukan format page_post (cth 1155303784344068_122094478419440123)
+        if "_" not in fb_id and config.PAGE_ID:
+            fb_id = f"{config.PAGE_ID}_{fb_id}"
+        # insights: impressions (views), unique impressions (reach), engaged users
+        # Perlu read_insights permission — kalau token takde, FB tolak dgn
+        # "(#100) The value must be a valid insights metric"; kita fallback.
+        views = reach = engaged = None
+        try:
+            ins_url = f"{config.GRAPH}/{fb_id}/insights?metric=post_impressions,post_impressions_unique,post_engaged_users&access_token={token}"
+            with urllib.request.urlopen(ins_url, timeout=30) as r:
+                ins = json.loads(r.read().decode()).get("data", [])
+            metrics = {m["name"]: (m["values"][-1]["value"] if m.get("values") else 0) for m in ins}
+            views = metrics.get("post_impressions", 0)
+            reach = metrics.get("post_impressions_unique", 0)
+            engaged = metrics.get("post_engaged_users", 0)
+        except urllib.error.HTTPError:
+            # tiada read_insights — views/reach kekal None (modal papar "—")
+            pass
+        # reactions/comments/shares (pages_read_engagement cukup)
+        eng_url = f"{config.GRAPH}/{fb_id}?fields=reactions.summary(true),comments.summary(true),shares&access_token={token}"
+        with urllib.request.urlopen(eng_url, timeout=30) as r:
+            eng = json.loads(r.read().decode())
+        return jsonify({
+            "views": views,
+            "reach": reach,
+            "engaged": engaged,
+            "reactions": (eng.get("reactions", {}) or {}).get("summary", {}).get("total_count", 0),
+            "comments": (eng.get("comments", {}) or {}).get("summary", {}).get("total_count", 0),
+            "shares": (eng.get("shares", {}) or {}).get("count", 0),
+            "fb_id": fb_id,
+            "insights_ok": views is not None,
+        })
+    except urllib.error.HTTPError as e:
+        body = e.read().decode()[:300]
+        return jsonify({"error": f"FB API {e.code}: {body}"}), 502
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/posts")
+def api_posts():
+    return jsonify(db.get_posts())
+
+
+def main():
+    db.seed_from_msgs()
+    print("Dashboard: http://127.0.0.1:8769/dashboard")
+    app.run(host="127.0.0.1", port=8769, debug=False)
+
+
+if __name__ == "__main__":
+    main()
