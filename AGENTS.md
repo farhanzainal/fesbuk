@@ -100,8 +100,25 @@ python src/fesbuk/fb_setup.py --page-id ...  # write config from user values
 
 ## Ads / boost tracking
 
-- To read ad spend via Graph API the token needs `ads_read` permission:
-  `GET /me/adaccounts` → `act_XXX`, then
-  `GET /act_XXX/insights?fields=spend,impressions,clicks,ctr&date_preset=last_7d`.
+- **Ads Manager page**: `http://127.0.0.1:8769/ads` (sidebar "💸 Ads") — shows the
+  activation steps when the ads token is missing, and the Total Spent stats once
+  activated. Route `/api/ads/activate` (POST {token}) activates; `/api/spend/refresh`
+  re-pulls.
+- **Ads token is DEDICATED**: stored in `~/.secrets/fb_ads_token.txt` — SEPARATE from
+  `fb_user_token_ll.txt` (page connection). To remove ads tracking, delete
+  `fb_ads_token.txt` + clear table `spend` + set setting `ads_status` = `no_token`.
+  Do NOT delete `fb_user_token_ll.txt` — that breaks the dashboard page listing.
+- **To GET the `ads_read` permission (user-verified path, NO business portfolio
+  needed):** `developers.facebook.com` → **My Apps** → pilih app → **Use Case** →
+  tambah **Marketing API** → kat situ `ads_read` & `ads_management` tersedia.
+  THEN back in Graph API Explorer the `ads_read` permission appears and can be
+  enabled. (Do NOT send the user to business.facebook.com settings — wrong path.)
+- **Activation flow**: Graph API Explorer → pilih app → mode **User Token** →
+  Add permission `ads_read` → Generate Access Token → paste at `/ads` → Aktifkan.
+  `fb_spend.activate_token()` exchanges to long-lived (~60 hari), verifies
+  `GET /me/adaccounts` → `act_XXX`, then pulls `GET /act_XXX/insights?fields=spend,impressions,clicks,ctr&date_preset=last_7d|this_month`
+  into DB table `spend` (snapshot rows).
+- **Cron**: `scripts/pull_spend.py` (daily 22:00 MY, watchdog pattern — silent on
+  success, exit 1 with message on failure).
 - Boost strategy (user): boosted ads, not bought likes; target KL/Selangor/JB/Penang,
   age 25-45, interests property/real estate; goal = engagement during brand exposure.

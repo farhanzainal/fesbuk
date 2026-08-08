@@ -32,6 +32,19 @@ CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT
 );
+
+CREATE TABLE IF NOT EXISTS spend (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ad_account TEXT,
+    account_name TEXT,
+    preset TEXT,          -- last_7d | this_month
+    spend REAL,
+    impressions INTEGER,
+    clicks INTEGER,
+    ctr REAL,
+    cpc REAL,
+    fetched_at TEXT
+);
 """
 
 
@@ -236,5 +249,62 @@ def get_posts(status=None):
         rows = conn.execute("SELECT * FROM posts WHERE status=? ORDER BY id", (status,)).fetchall()
     else:
         rows = conn.execute("SELECT * FROM posts ORDER BY id").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+# ---------- spend tracking (FB Ads API, needs ads_read) ----------
+
+def _f(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _i(v):
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return 0
+
+
+def save_spend(ad_account: str, account_name: str, results: dict):
+    """Insert a snapshot row per preset (last_7d / this_month) with same fetched_at."""
+    conn = _conn()
+    now = datetime.now(timezone.utc).isoformat()
+    for preset, row in results.items():
+        if not isinstance(row, dict) or "error" in row:
+            continue
+        conn.execute(
+            "INSERT INTO spend (ad_account, account_name, preset, spend, impressions, clicks, ctr, cpc, fetched_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (ad_account, account_name, preset,
+             _f(row.get("spend")), _i(row.get("impressions")), _i(row.get("clicks")),
+             _f(row.get("ctr")), _f(row.get("cpc")), now),
+        )
+    conn.commit()
+    conn.close()
+
+
+def latest_snapshot():
+    """Latest pull grouped by preset. Returns dict or None."""
+    conn = _conn()
+    t = conn.execute("SELECT MAX(fetched_at) AS t FROM spend").fetchone()
+    if not t or not t["t"]:
+        conn.close()
+        return None
+    rows = conn.execute("SELECT * FROM spend WHERE fetched_at=?", (t["t"],)).fetchall()
+    conn.close()
+    return {
+        "fetched_at": t["t"],
+        "rows": {r["preset"]: dict(r) for r in rows},
+    }
+
+
+def spend_history(limit=40):
+    """Recent snapshot rows (each pull = 2 rows)."""
+    conn = _conn()
+    rows = conn.execute("SELECT * FROM spend ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
     conn.close()
     return [dict(r) for r in rows]

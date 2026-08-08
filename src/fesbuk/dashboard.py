@@ -11,10 +11,12 @@ import urllib.parse
 from datetime import datetime
 
 from flask import Flask, jsonify, render_template_string, request, redirect
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import config
 import db
+import fb_spend
+import fb_page
 
 app = Flask(__name__)
 
@@ -110,6 +112,18 @@ HTML = """<!doctype html>
   a { color:var(--accent); text-decoration:none; }
   .foot { color:var(--muted); font-size:12px; margin-top:24px; }
   .empty { color:var(--muted); font-size:13px; padding:6px 0; }
+  /* ---------- PAGE SETUP NUDGE (token belum sambung) ---------- */
+  .setup-nudge { background:rgba(255,255,255,.65); border:1.5px solid rgba(79,110,247,.35); border-radius:16px; padding:18px 20px; margin-bottom:20px; }
+  .setup-nudge .t { font-weight:800; font-size:14px; color:var(--accent); margin-bottom:6px; }
+  .setup-nudge ol { margin:0 0 12px; padding-left:20px; font-size:13px; line-height:1.9; }
+  .setup-nudge code { background:#eef1fb; padding:1px 6px; border-radius:5px; font-size:12px; color:var(--accent); }
+  .paste { width:100%; min-height:70px; border:1.5px dashed rgba(79,110,247,.5); border-radius:12px; padding:12px; font-family:monospace; font-size:12px; resize:vertical; margin:6px 0 10px; }
+  .err { color:var(--bad); font-size:13px; min-height:18px; font-weight:600; margin-bottom:8px; }
+  .btn { padding:7px 14px; border-radius:20px; border:1px solid rgba(79,110,247,.4); background:#fff; color:var(--accent); font-weight:700; font-size:12px; cursor:pointer; text-decoration:none; display:inline-block; }
+  .btn:hover { background:var(--accent); color:#fff; }
+  .btn.primary { background:var(--accent); color:#fff; border-color:var(--accent); padding:9px 20px; font-size:13px; }
+  .btn.primary:hover { background:#3d5ae0; }
+  .ok-banner { background:#dcfce7; color:var(--good); font-weight:700; font-size:13px; border-radius:12px; padding:12px 16px; margin-bottom:16px; }
 </style>
 </head>
 <body>
@@ -120,6 +134,7 @@ HTML = """<!doctype html>
     <a class="active" href="/dashboard">📊 Dashboard</a>
     <a href="/post">📝 Post</a>
     <a href="/pages">📄 Pages</a>
+    <a href="/ads">💸 Ads</a>
   </nav>
   <div class="side-foot">
     token: <b>{{ 'OK' if token_ok else 'MISSING' }}</b><br>
@@ -136,6 +151,25 @@ HTML = """<!doctype html>
     </div>
     <span class="pill">{{ pages|length }} page(s)</span>
   </div>
+
+  {% if connected_flag %}
+  <div class="ok-banner">✅ Page berjaya disambung! Posting & dashboard sedia digunakan.</div>
+  {% endif %}
+
+  {% if page_setup_needed %}
+  <div class="setup-nudge">
+    <div class="t">🔑 Sambung Facebook Page — token belum aktif</div>
+    <ol>
+      <li>Buka <a href="https://developers.facebook.com/tools/explorer/" target="_blank">Graph API Explorer</a> → pilih app ID <b>{{ app_id or '-' }}</b></li>
+      <li>Mode <b>User Token</b> → Add permission <code>pages_show_list</code>, <code>pages_manage_posts</code>, <code>pages_read_engagement</code></li>
+      <li>Klik <b>Generate Access Token</b> → benarkan semua permission</li>
+      <li>Salin token (mula dgn <code>EAAT...</code>) dan tampal kat bawah → klik <b>Sambung</b></li>
+    </ol>
+    <div class="err" id="pErr"></div>
+    <textarea class="paste" id="ptok" placeholder="Tampal token user (EAAT...)"></textarea>
+    <button class="btn primary" onclick="connectPage(this)">Sambung</button>
+  </div>
+  {% endif %}
 
   <div class="stats">
     <div class="glass stat"><div class="i">📄</div><div class="v">{{ pages|length }}</div><div class="l">Pages Connected</div></div>
@@ -161,6 +195,28 @@ HTML = """<!doctype html>
 
   <div class="foot">fesbuk v0.1.0</div>
 </main>
+
+<script>
+function connectPage(btn){
+  var tok = document.getElementById('ptok').value.trim();
+  var err = document.getElementById('pErr');
+  if(!tok){ err.textContent = '❌ Tampal token dulu.'; return; }
+  btn.disabled = true; btn.textContent = 'Menyambung...';
+  fetch('/api/page/activate', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({token: tok})})
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      if(d.ok){ location.href = '/dashboard?connected=1'; }
+      else {
+        err.textContent = '❌ ' + (d.error || 'Gagal. Cuba lagi.');
+        btn.disabled = false; btn.textContent = 'Sambung';
+      }
+    })
+    .catch(function(e){
+      err.textContent = '❌ ' + e;
+      btn.disabled = false; btn.textContent = 'Sambung';
+    });
+}
+</script>
 
 </body>
 </html>"""
@@ -231,6 +287,7 @@ POST_HTML = """<!doctype html>
     <a href="/dashboard">📊 Dashboard</a>
     <a class="active" href="/post">📝 Post</a>
     <a href="/pages">📄 Pages</a>
+    <a href="/ads">💸 Ads</a>
   </nav>
   <div class="side-foot">token: <b>{{ 'OK' if token_ok else 'MISSING' }}</b><br>page: <b>{{ config_page or '-' }}</b><br>v0.1.0</div>
 </aside>
@@ -385,6 +442,7 @@ PAGES_HTML = """<!doctype html>
     <a href="/dashboard">📊 Dashboard</a>
     <a href="/post">📝 Post</a>
     <a class="active" href="/pages">📄 Pages</a>
+    <a href="/ads">💸 Ads</a>
   </nav>
   <div class="side-foot">token: <b>{{ 'OK' if token_ok else 'MISSING' }}</b><br>page: <b>{{ config_page or '-' }}</b><br>v0.1.0</div>
 </aside>
@@ -495,6 +553,7 @@ NEW_POST_HTML = """<!doctype html>
     <a href="/dashboard">📊 Dashboard</a>
     <a class="active" href="/post">📝 Post</a>
     <a href="/pages">📄 Pages</a>
+    <a href="/ads">💸 Ads</a>
   </nav>
   <div class="side-foot">token: <b>{{ 'OK' if token_ok else 'MISSING' }}</b><br>page: <b>{{ config_page or '-' }}</b><br>v0.1.0</div>
 </aside>
@@ -599,6 +658,156 @@ dz.addEventListener('drop', e => {
 </body>
 </html>"""
 
+ADS_HTML = """<!doctype html>
+<html lang="ms">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fesbuk · Ads Manager</title>
+<style>
+  :root {
+    --ink:#1a2332; --muted:#6b7a90; --line:rgba(255,255,255,.55);
+    --accent:#4f6ef7; --accent2:#7c5cf0; --good:#16a34a; --warn:#d97706; --bad:#dc2626;
+  }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:'Segoe UI', system-ui, -apple-system, sans-serif; background:linear-gradient(135deg,#eef1fb,#e7ecfa); min-height:100vh; color:var(--ink); display:flex; }
+  .sidebar { width:230px; background:rgba(255,255,255,.7); backdrop-filter:blur(14px); border-right:1px solid var(--line); padding:22px 16px; min-height:100vh; display:flex; flex-direction:column; }
+  .logo { font-weight:800; font-size:17px; display:flex; align-items:center; gap:8px; margin-bottom:26px; }
+  .dot { width:9px; height:9px; border-radius:50%; background:var(--accent); display:inline-block; }
+  .nav { display:flex; flex-direction:column; gap:4px; }
+  .nav a { padding:10px 12px; border-radius:12px; color:var(--ink); text-decoration:none; font-weight:600; font-size:14px; }
+  .nav a:hover { background:rgba(79,110,247,.08); }
+  .nav a.active { background:var(--accent); color:#fff; }
+  .side-foot { margin-top:auto; color:var(--muted); font-size:12px; line-height:1.7; }
+  .main { flex:1; padding:26px 30px; max-width:980px; }
+  .top { display:flex; align-items:flex-start; justify-content:space-between; margin-bottom:20px; }
+  h1 { font-size:22px; }
+  .sub { color:var(--muted); font-size:13px; margin-top:2px; }
+  .pill { padding:6px 14px; border-radius:20px; font-size:12px; font-weight:700; background:rgba(255,255,255,.7); border:1px solid var(--line); }
+  .glass { background:rgba(255,255,255,.55); backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px); border:1px solid var(--line); border-radius:18px; box-shadow:0 8px 28px rgba(30,40,90,.07); padding:18px 20px; margin-bottom:20px; }
+  h2 { font-size:14px; font-weight:800; text-transform:uppercase; letter-spacing:1px; color:var(--muted); margin:26px 0 10px; }
+  .stat-grid { display:grid; grid-template-columns:repeat(5,1fr); gap:10px; }
+  .stat-card { background:#f8fafc; border:1px solid rgba(30,40,90,.07); border-radius:14px; padding:14px 10px; text-align:center; }
+  .stat-card .v { font-size:20px; font-weight:800; color:var(--accent); }
+  .stat-card .l { font-size:11px; color:var(--muted); font-weight:600; margin-top:3px; }
+  .btn { padding:7px 14px; border-radius:20px; border:1px solid rgba(79,110,247,.4); background:#fff; color:var(--accent); font-weight:700; font-size:12px; cursor:pointer; }
+  .btn:hover { background:var(--accent); color:#fff; }
+  .btn.primary { background:var(--accent); color:#fff; border-color:var(--accent); padding:10px 22px; font-size:14px; }
+  .btn.primary:hover { background:#3d5ae0; }
+  .meta { color:var(--muted); font-size:12px; margin-top:8px; }
+  .steps { counter-reset:step; list-style:none; }
+  .steps li { position:relative; padding:10px 0 10px 42px; font-size:14px; line-height:1.5; }
+  .steps li::before { counter-increment:step; content:counter(step); position:absolute; left:0; top:12px; width:26px; height:26px; border-radius:50%; background:var(--accent); color:#fff; font-weight:800; font-size:13px; display:flex; align-items:center; justify-content:center; }
+  .steps code { background:#eef1fb; padding:2px 8px; border-radius:6px; font-size:13px; color:var(--accent); }
+  .paste { width:100%; min-height:90px; border:1.5px dashed rgba(79,110,247,.5); border-radius:12px; padding:12px; font-family:monospace; font-size:12px; resize:vertical; margin:6px 0 12px; }
+  .err { color:var(--bad); font-size:13px; margin-bottom:10px; min-height:18px; font-weight:600; }
+  .ok-banner { background:#dcfce7; color:var(--good); font-weight:700; font-size:13px; border-radius:12px; padding:12px 16px; margin-bottom:16px; }
+  .empty { color:var(--muted); font-size:13px; padding:6px 0; }
+  .note { color:var(--warn); font-size:12px; margin-top:8px; }
+</style>
+</head>
+<body>
+
+<aside class="sidebar">
+  <div class="logo"><span class="dot"></span> fesbuk</div>
+  <nav class="nav">
+    <a href="/dashboard">📊 Dashboard</a>
+    <a href="/post">📝 Post</a>
+    <a href="/pages">📄 Pages</a>
+    <a class="active" href="/ads">💸 Ads</a>
+  </nav>
+  <div class="side-foot">
+    token: <b>{{ 'OK' if token_ok else 'MISSING' }}</b><br>
+    page: <b>{{ config_page or '-' }}</b><br>
+    v0.1.0
+  </div>
+</aside>
+
+<main class="main">
+  <div class="top">
+    <div>
+      <h1>Ads Manager</h1>
+      <div class="sub">{{ now }} · Spend tracking dari FB Ads API</div>
+    </div>
+    {% if activated %}<span class="pill">🟢 Aktif</span>{% else %}<span class="pill">🔴 Belum aktif</span>{% endif %}
+  </div>
+
+  {% if activated_flag %}
+  <div class="ok-banner">✅ Token berjaya diaktifkan! Total spend di bawah.</div>
+  {% endif %}
+
+  {% if activated %}
+  <h2>💰 Total Spent</h2>
+  <div class="glass">
+    <div class="stat-grid">
+      <div class="stat-card"><div class="v">RM{{ '%.2f'|format(spend.spend_month) }}</div><div class="l">Bulan Ini</div></div>
+      <div class="stat-card"><div class="v">RM{{ '%.2f'|format(spend.spend_7d) }}</div><div class="l">7 Hari Terakhir</div></div>
+      <div class="stat-card"><div class="v">{{ '{:,}'.format(spend.imps) }}</div><div class="l">👁️ Impressions</div></div>
+      <div class="stat-card"><div class="v">{{ spend.clicks }}</div><div class="l">🖱️ Clicks</div></div>
+      <div class="stat-card"><div class="v">{{ '%.2f'|format(spend.ctr) }}%</div><div class="l">CTR</div></div>
+    </div>
+    <div class="meta">📡 Dikemaskini: {{ spend.fetched_at|fmtdate }} · {{ spend.acct }}
+      <button class="btn" style="float:right" onclick="refreshSpend(this)">⟳ Refresh</button>
+    </div>
+    {% if spend.error %}<div class="note">⚠️ {{ spend.error }}</div>{% endif %}
+  </div>
+  {% else %}
+
+  <h2>🔑 Aktifkan Token Ads</h2>
+  <div class="glass">
+    <div class="err" id="actErr">{{ error or '' }}</div>
+    <ol class="steps">
+      <li>Buka <a href="https://developers.facebook.com/tools/explorer/" target="_blank">Graph API Explorer</a> dan login dgn akaun FB yang ada akses Ads Manager.</li>
+      <li>Pilih app yang betul: <b>ID {{ app_id or '-' }}</b> (app mesti LIVE).</li>
+      <li>Pastikan mode pilih <b>"User Token"</b> — BUKAN "Page Token".</li>
+      <li>Kalau <code>ads_read</code> TAK muncul dalam senarai permission: pergi <a href="https://developers.facebook.com/apps/{{ app_id or '' }}/" target="_blank">My Apps</a> → pilih app → <b>Use Case</b> → tambah <b>Marketing API</b> — kat situ <code>ads_read</code> & <code>ads_management</code> tersedia. Lepas tambah, balik ke langkah 4.</li>
+      <li>Klik <b>"Add a permission"</b> → taip <code>ads_read</code> → pilih.</li>
+      <li>Klik <b>"Generate Access Token"</b> → benarkan semua permission.</li>
+      <li>Salin token (mula dgn <code>EAAT...</code>) dan tampal kat bawah, lepas tu klik <b>Aktifkan</b>.</li>
+    </ol>
+    <textarea class="paste" id="tok" placeholder="Tampal token kat sini (EAAT...)"></textarea>
+    <button class="btn primary" onclick="activateAds(this)">Aktifkan</button>
+  </div>
+  {% endif %}
+</main>
+
+<script>
+function activateAds(btn){
+  var tok = document.getElementById('tok').value.trim();
+  var err = document.getElementById('actErr');
+  if(!tok){ err.textContent = '❌ Tampal token dulu.'; return; }
+  btn.disabled = true; btn.textContent = 'Mengaktifkan...';
+  fetch('/api/ads/activate', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({token: tok})})
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      if(d.ok){ location.href = '/ads?activated=1'; }
+      else {
+        err.textContent = '❌ ' + (d.error || 'Gagal. Cuba lagi.');
+        btn.disabled = false; btn.textContent = 'Aktifkan';
+      }
+    })
+    .catch(function(e){
+      err.textContent = '❌ ' + e;
+      btn.disabled = false; btn.textContent = 'Aktifkan';
+    });
+}
+function refreshSpend(btn){
+  if(!btn) return;
+  btn.disabled = true; btn.textContent = 'Mengambil...';
+  fetch('/api/spend/refresh', {method:'POST'}).then(function(r){ return r.json(); }).then(function(d){
+    if(d.ok){ location.reload(); return; }
+    alert('Gagal tarik spend:\n' + (d.error || '?'));
+    btn.disabled = false; btn.textContent = '⟳ Refresh';
+  }).catch(function(e){
+    alert('Ralat: ' + e);
+    btn.disabled = false; btn.textContent = '⟳ Refresh';
+  });
+}
+</script>
+
+</body>
+</html>"""
+
 
 def _graph(path, token, fields=None):
     url = f"{config.GRAPH}/{path}?" + urllib.parse.urlencode(
@@ -648,6 +857,51 @@ def connected_pages():
         return [{"id": "-", "name": f"Error: {e}", "live": False, "hidden": False}], True
 
 
+def _spend_view():
+    """Latest spend snapshot; auto-pull bila tiada data atau dah >6 jam. Tak pernah raise."""
+    snap = db.latest_snapshot()
+    err = None
+    stale = True
+    if snap:
+        try:
+            t = datetime.fromisoformat(snap["fetched_at"].replace("Z", "+00:00"))
+            stale = (datetime.now(timezone.utc) - t) > timedelta(hours=6)
+        except Exception:
+            stale = True
+    if not snap or stale:
+        try:
+            res = fb_spend.pull_and_store()
+            if res.get("ok"):
+                snap = db.latest_snapshot()
+            else:
+                err = res.get("error")
+                # Token tak berkenan (ads_read hilang / expired) → papar step activate,
+                # walau ada data lama. User spec: belum activate = tunjuk step.
+                if "ads_read" in (err or "") or "permission" in (err or "").lower():
+                    return {"ok": False, "error": err, "acct": "", "fetched_at": "",
+                            "spend_month": 0, "spend_7d": 0, "imps": 0, "clicks": 0, "ctr": 0}
+        except Exception as e:
+            err = str(e)
+    if not snap:
+        return {"ok": False, "error": err or "Belum ada data spend.", "acct": "",
+                "fetched_at": "", "spend_month": 0, "spend_7d": 0, "imps": 0, "clicks": 0, "ctr": 0}
+    rows = snap.get("rows", {})
+    r7 = rows.get("last_7d", {}) or {}
+    rm = rows.get("this_month", {}) or {}
+    base = r7 or rm
+    return {
+        "ok": True,
+        "error": err,
+        "acct": base.get("account_name", "") or base.get("ad_account", ""),
+        "fetched_at": snap["fetched_at"],
+        "spend_month": rm.get("spend", 0),
+        "spend_7d": r7.get("spend", 0),
+        "imps": r7.get("impressions", 0),
+        "clicks": r7.get("clicks", 0),
+        "ctr": r7.get("ctr", 0),
+    }
+
+
 @app.route("/")
 def index():
     return {"service": "fesbuk dashboard", "dashboard": "/dashboard"}
@@ -658,16 +912,81 @@ def dashboard():
     db.seed_from_msgs()
     pages, token_ok = connected_pages()
     visible = [p for p in pages if not p.get("hidden")]
+    try:
+        app_id = config.load_app_token().split("|")[0]
+    except Exception:
+        app_id = ""
+    connected_flag = request.args.get("connected") == "1"
     return render_template_string(
         HTML,
         pages=visible,
         live_count=sum(1 for p in visible if p.get("live")),
         pending=db.get_posts("pending"),
         posted=db.get_posts("posted"),
+        page_setup_needed=fb_page.page_token_status() != "ok",
+        app_id=app_id,
+        connected_flag=connected_flag,
         now=datetime.now().strftime("%d %b %Y %H:%M"),
         token_ok=token_ok,
         config_page=config.PAGE_ID or "-",
     )
+
+
+@app.route("/api/page/activate", methods=["POST"])
+def api_page_activate():
+    try:
+        data = request.get_json(silent=True) or {}
+        res = fb_page.activate_page_token(data.get("token", ""))
+        if res.get("ok"):
+            return jsonify(res)
+        return jsonify(res), 400
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/spend/refresh", methods=["POST"])
+def api_spend_refresh():
+    try:
+        res = fb_spend.pull_and_store()
+        if res.get("ok"):
+            return jsonify(res)
+        return jsonify(res), 400
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/ads")
+def ads_page():
+    db.init_db()
+    try:
+        app_id = config.load_app_token().split("|")[0]
+    except Exception:
+        app_id = ""
+    activated_flag = request.args.get("activated") == "1"
+    view = _spend_view()  # panggil sekali sahaja (elak API dipukul 3x)
+    return render_template_string(
+        ADS_HTML,
+        activated=bool(view.get("ok")),
+        spend=view,
+        error=view.get("error", ""),
+        app_id=app_id,
+        activated_flag=activated_flag,
+        now=datetime.now().strftime("%d %b %Y %H:%M"),
+        token_ok=True,
+        config_page=config.PAGE_ID or "-",
+    )
+
+
+@app.route("/api/ads/activate", methods=["POST"])
+def api_ads_activate():
+    try:
+        data = request.get_json(silent=True) or {}
+        res = fb_spend.activate_token(data.get("token", ""))
+        if res.get("ok"):
+            return jsonify(res)
+        return jsonify(res), 400
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route("/pages")

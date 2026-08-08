@@ -63,6 +63,56 @@ Start it:
 - API: `http://127.0.0.1:8769/api/posts` (JSON)
 - DB + post images live in `database/` (private, never committed)
 
+## Ads Manager (spend tracking)
+
+Sidebar page `http://127.0.0.1:8769/ads` — tracks **total ad spend** from the FB
+Ads API (boosted posts). Shows the activation steps when no ads token is connected,
+and the stats (bulan ini / 7 hari / impressions / clicks / CTR) once activated.
+
+```
+GET /me/adaccounts            → act_XXX
+GET /act_XXX/insights?fields=spend,impressions,clicks,ctr&date_preset=last_7d
+```
+
+### Enable `ads_read` (one-time, verified steps)
+
+The `ads_read` permission is NOT available in Graph API Explorer until the app has
+the **Marketing API** use case. Do this:
+
+1. [developers.facebook.com](https://developers.facebook.com) → **My Apps** → pilih app.
+2. **Use Case** → **Add** → pilih **Marketing API**.
+3. Kat situ `ads_read` & `ads_management` tersedia.
+4. Balik ke **Graph API Explorer** → pilih app → mode **User Token** →
+   **Add a permission** → taip `ads_read` → pilih → **Generate Access Token** → benarkan.
+5. Salin token (`EAAT...`) → tampal kat `/ads` → **Aktifkan**.
+
+> No business portfolio / Business Verification needed for this path. Do NOT use
+> business.facebook.com settings — wrong path.
+
+### How activation works
+
+`fb_spend.activate_token()` (route `/api/ads/activate`) exchanges the pasted token
+to a **long-lived token (~60 hari)** with the app's ID+Secret, verifies
+`GET /me/adaccounts`, then pulls snapshots into DB table `spend`
+(last_7d + this_month). The token is stored in a **dedicated file**:
+
+| Item | Location |
+|---|---|
+| Ads token (long-lived, dedicated) | `~/.secrets/fb_ads_token.txt` |
+| Page token (never expires) | `~/.secrets/fb_page_token.txt` |
+| Long-lived user token (page conn) | `~/.secrets/fb_user_token_ll.txt` |
+| Short user token (refresh) | `~/.secrets/fb_user_token.txt` |
+| App ID + Secret | `~/.secrets/fb_app.txt` |
+
+> **Why separate files:** the ads token (`fb_ads_token.txt`) is independent of the
+> page-connection user token (`fb_user_token_ll.txt`). Removing ads tracking
+> (delete `fb_ads_token.txt` + clear `spend` table) never breaks the dashboard.
+
+### Cron
+
+`scripts/pull_spend.py` — daily 22:00 MY, watchdog pattern (silent on success,
+exit 1 + message on failure).
+
 ## Setup (one time)
 
 1. **Create a Meta app** with use case "Manage Everything on your page".
@@ -126,6 +176,7 @@ overridable via `FB_SECRETS_DIR` env var).
 | Page token (never expires) | `~/.secrets/fb_page_token.txt` |
 | Long-lived user token (60d) | `~/.secrets/fb_user_token_ll.txt` |
 | Short user token (refresh) | `~/.secrets/fb_user_token.txt` |
+| Ads token (long-lived, dedicated) | `~/.secrets/fb_ads_token.txt` |
 | App ID + Secret | `~/.secrets/fb_app.txt` |
 
 ## Cron / automation
