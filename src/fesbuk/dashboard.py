@@ -796,7 +796,7 @@ function refreshSpend(btn){
   btn.disabled = true; btn.textContent = 'Mengambil...';
   fetch('/api/spend/refresh', {method:'POST'}).then(function(r){ return r.json(); }).then(function(d){
     if(d.ok){ location.reload(); return; }
-    alert('Gagal tarik spend:\n' + (d.error || '?'));
+    alert('Gagal tarik spend:\\n' + (d.error || '?'));
     btn.disabled = false; btn.textContent = '⟳ Refresh';
   }).catch(function(e){
     alert('Ralat: ' + e);
