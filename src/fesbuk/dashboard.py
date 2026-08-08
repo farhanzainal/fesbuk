@@ -704,6 +704,36 @@ ADS_HTML = """<!doctype html>
   .ok-banner { background:#dcfce7; color:var(--good); font-weight:700; font-size:13px; border-radius:12px; padding:12px 16px; margin-bottom:16px; }
   .empty { color:var(--muted); font-size:13px; padding:6px 0; }
   .note { color:var(--warn); font-size:12px; margin-top:8px; }
+  /* ---------- BOOSTED POSTS TABLE ---------- */
+  .table-wrap { overflow-x:auto; }
+  .ad-table { width:100%; border-collapse:collapse; font-size:13px; }
+  .ad-table th { text-align:left; color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.4px; padding:8px 10px; border-bottom:2px solid rgba(30,40,90,.08); }
+  .ad-table td { padding:10px; border-bottom:1px solid rgba(30,40,90,.05); vertical-align:middle; }
+  .ad-table tr:hover td { background:rgba(79,110,247,.04); }
+  .td-name { font-weight:600; max-width:280px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .st { display:inline-block; padding:2px 10px; border-radius:12px; font-size:11px; font-weight:700; }
+  .st-active { background:#dcfce7; color:var(--good); }
+  .st-paused { background:#fef3c7; color:#b45309; }
+  .st-archived, .st-deleted, .st-completed { background:#e5e7eb; color:#4b5563; }
+  .st-pending_review { background:#fef3c7; color:#b45309; }
+  /* ---------- MODAL ---------- */
+  .modal { display:none; position:fixed; inset:0; background:rgba(15,23,42,.55); z-index:50; align-items:center; justify-content:center; padding:20px; }
+  .modal.open { display:flex; }
+  .modal-box { background:#fff; border-radius:18px; max-width:860px; width:100%; max-height:86vh; overflow-y:auto; padding:22px 24px; box-shadow:0 20px 60px rgba(15,23,42,.35); }
+  .modal-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:8px; }
+  .modal-head h3 { margin:0; font-size:17px; }
+  .modal-x { background:none; border:none; font-size:22px; cursor:pointer; color:var(--muted); line-height:1; padding:4px 8px; }
+  .modal-x:hover { color:var(--bad); }
+  .day-table { width:100%; border-collapse:collapse; font-size:12.5px; margin-top:10px; }
+  .day-table th { text-align:right; color:var(--muted); font-size:10.5px; text-transform:uppercase; letter-spacing:.3px; padding:6px 8px; border-bottom:2px solid rgba(30,40,90,.08); }
+  .day-table th:first-child { text-align:left; }
+  .day-table td { text-align:right; padding:6px 8px; border-bottom:1px solid rgba(30,40,90,.05); font-variant-numeric:tabular-nums; }
+  .day-table td:first-child { text-align:left; font-weight:600; }
+  .day-table tr.total td { font-weight:800; border-top:2px solid rgba(30,40,90,.12); border-bottom:none; background:rgba(79,110,247,.05); }
+  .ad-meta { display:flex; flex-wrap:wrap; gap:6px 18px; font-size:12px; color:var(--muted); margin:4px 0 2px; }
+  .ad-meta b { color:var(--ink); }
+  .ad-link { display:inline-block; margin-top:10px; font-size:13px; font-weight:700; color:var(--accent); text-decoration:none; }
+  .ad-link:hover { text-decoration:underline; }
 </style>
 </head>
 <body>
@@ -751,6 +781,43 @@ ADS_HTML = """<!doctype html>
     </div>
     {% if spend.error %}<div class="note">⚠️ {{ spend.error }}</div>{% endif %}
   </div>
+
+  <h2>📊 Boosted Posts</h2>
+  <div class="glass">
+    {% if ads_view.ads %}
+    <div class="table-wrap">
+    <table class="ad-table">
+      <thead>
+        <tr>
+          <th>Post</th>
+          <th>Status</th>
+          <th>Hari Aktif</th>
+          <th>Spend</th>
+          <th>👁️ Imps</th>
+          <th>👍💬🔗</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for ad in ads_view.ads %}
+        <tr>
+          <td class="td-name">{{ ad.name }}</td>
+          <td><span class="st st-{{ ad.status|lower }}">{{ ad.status }}</span></td>
+          <td>{{ ad.days_active }}<br><small>{{ ad.first_day }} → {{ ad.last_day }}</small></td>
+          <td><b>RM{{ '%.2f'|format(ad.totals.spend) }}</b></td>
+          <td>{{ '{:,}'.format(ad.totals.impressions) }}</td>
+          <td>{{ ad.totals.likes }}👍 {{ ad.totals.comments }}💬 {{ ad.totals.shares }}🔗</td>
+          <td><button class="btn" onclick="viewAd('{{ ad.id }}')">View</button></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    <div class="meta">📡 Ads breakdown: {{ ads_view.fetched_at|fmtdate }} · tempoh 7 hari terakhir</div>
+    {% else %}
+    <div class="empty">Belum ada data boosted posts. Tekan ⟳ Refresh untuk tarik senarai ads dari FB.</div>
+    {% endif %}
+  </div>
   {% else %}
 
   <h2>🔑 Aktifkan Token Ads</h2>
@@ -769,9 +836,23 @@ ADS_HTML = """<!doctype html>
     <button class="btn primary" onclick="activateAds(this)">Aktifkan</button>
   </div>
   {% endif %}
+
+  <div class="modal" id="adModal">
+    <div class="modal-box">
+      <div class="modal-head">
+        <div>
+          <h3 id="mName">-</h3>
+          <div class="ad-meta" id="mMeta"></div>
+        </div>
+        <button class="modal-x" onclick="closeModal()">✕</button>
+      </div>
+      <div id="mBody"></div>
+    </div>
+  </div>
 </main>
 
 <script>
+var ADS_DATA = {{ ads_view.ads|tojson }};
 function activateAds(btn){
   var tok = document.getElementById('tok').value.trim();
   var err = document.getElementById('actErr');
@@ -794,15 +875,50 @@ function activateAds(btn){
 function refreshSpend(btn){
   if(!btn) return;
   btn.disabled = true; btn.textContent = 'Mengambil...';
-  fetch('/api/spend/refresh', {method:'POST'}).then(function(r){ return r.json(); }).then(function(d){
-    if(d.ok){ location.reload(); return; }
-    alert('Gagal tarik spend:\\n' + (d.error || '?'));
+  fetch('/api/ads/refresh', {method:'POST'}).then(function(r){ return r.json(); }).then(function(d){
+    if(d.ok || d.ad_count !== undefined){ location.reload(); return; }
+    alert('Gagal tarik: ' + (d.error || '?'));
     btn.disabled = false; btn.textContent = '⟳ Refresh';
   }).catch(function(e){
     alert('Ralat: ' + e);
     btn.disabled = false; btn.textContent = '⟳ Refresh';
   });
 }
+function fmtRM(v){ return 'RM' + Number(v||0).toFixed(2); }
+function fmtN(v){ return Number(v||0).toLocaleString('en-MY'); }
+function viewAd(id){
+  var ad = null;
+  for(var i=0;i<ADS_DATA.length;i++){ if(ADS_DATA[i].id === id){ ad = ADS_DATA[i]; break; } }
+  if(!ad) return;
+  document.getElementById('mName').textContent = ad.name || ad.id;
+  var meta = 'Status: <b>' + (ad.status||'-') + '</b> · Hari aktif: <b>' + ad.days_active + '</b>';
+  if(ad.first_day && ad.last_day){ meta += ' · Tempoh: <b>' + ad.first_day + ' → ' + ad.last_day + '</b>'; }
+  if(ad.created_time){ meta += ' · Dibuat: <b>' + ad.created_time.slice(0,10) + '</b>'; }
+  document.getElementById('mMeta').innerHTML = meta;
+  var head = '<table class="day-table"><thead><tr>' +
+    '<th>Tarikh</th><th>💸 Spend</th><th>👁️ Imps</th><th>📡 Reach</th><th>🖱️ Clicks</th>' +
+    '<th>CTR</th><th>👍 Likes</th><th>💬 Cmt</th><th>🔗 Shares</th></tr></thead><tbody>';
+  var body = '';
+  for(var j=0;j<ad.days.length;j++){
+    var d = ad.days[j];
+    body += '<tr><td>' + d.date + '</td><td>' + fmtRM(d.spend) + '</td><td>' + fmtN(d.impressions) +
+      '</td><td>' + fmtN(d.reach) + '</td><td>' + d.clicks + '</td><td>' + Number(d.ctr||0).toFixed(2) + '%</td>' +
+      '<td>' + d.likes + '</td><td>' + d.comments + '</td><td>' + d.shares + '</td></tr>';
+  }
+  var t = ad.totals || {};
+  body += '<tr class="total"><td>Total</td><td>' + fmtRM(t.spend) + '</td><td>' + fmtN(t.impressions) +
+    '</td><td>' + fmtN(t.reach) + '</td><td>' + t.clicks + '</td><td>' + Number(t.ctr||0).toFixed(2) + '%</td>' +
+    '<td>' + t.likes + '</td><td>' + t.comments + '</td><td>' + t.shares + '</td></tr>';
+  var link = ad.post_url ? '<a class="ad-link" href="' + ad.post_url + '" target="_blank">Buka post di Facebook →</a>' : '';
+  document.getElementById('mBody').innerHTML = head + body + '</tbody></table>' + link;
+  document.getElementById('adModal').classList.add('open');
+}
+function closeModal(){
+  document.getElementById('adModal').classList.remove('open');
+}
+document.getElementById('adModal').addEventListener('click', function(e){
+  if(e.target === this){ closeModal(); }
+});
 </script>
 
 </body>
@@ -960,6 +1076,7 @@ def ads_page():
         app_id = ""
     activated_flag = request.args.get("activated") == "1"
     view = _spend_view()  # panggil sekali sahaja (elak API dipukul 3x)
+    ads = fb_spend.load_ads_view()
     return render_template_string(
         ADS_HTML,
         activated=bool(view.get("ok")),
@@ -967,10 +1084,30 @@ def ads_page():
         error=view.get("error", ""),
         app_id=app_id,
         activated_flag=activated_flag,
+        ads_view=ads,
         now=datetime.now().strftime("%d %b %Y %H:%M"),
         token_ok=True,
         config_page=config.PAGE_ID or "-",
     )
+
+
+@app.route("/api/ads/refresh", methods=["POST"])
+def api_ads_refresh():
+    """Tarik semula spend + senarai boosted posts (breakdown harian)."""
+    try:
+        res = fb_spend.pull_and_store()
+        res2 = fb_spend.pull_ads()
+        ok = bool(res.get("ok")) or bool(res2.get("ok"))
+        errs = [e for e in (res.get("error"), res2.get("error")) if e]
+        return jsonify({
+            "ok": ok,
+            "error": "; ".join(errs) if errs else "",
+            "spend": res.get("ok", False),
+            "ads": res2.get("ok", False),
+            "ad_count": res2.get("count", 0),
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route("/api/ads/activate", methods=["POST"])
