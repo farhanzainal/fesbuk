@@ -22,6 +22,12 @@ def main():
     if not page_id:
         print("ERROR: PAGE_ID kosong — set dalam fesbuk/.env")
         sys.exit(1)
+    token = config.load_token()
+    if not token:
+        print("ERROR: Tiada page token dalam DB (fb_page_token).")
+        print("Sambung page dulu: dashboard → 'Sambung Facebook Page' atau")
+        print("python src/fb_setup.py --token <page-token>")
+        sys.exit(1)
     print("=== FB TEST ===")
     info = api(page_id, {"fields": "id,name,fan_count,link,about"})
     print(f"Page : {info.get('name')} ({info.get('id')})")

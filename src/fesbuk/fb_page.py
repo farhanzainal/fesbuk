@@ -7,7 +7,7 @@ ads_read. Dua-dua flow setup sendiri-sendiri.
 
 Aliran: user token (Graph API Explorer) -> exchange long-lived (~60 hari)
 -> /me/accounts -> page token untuk PAGE_ID (never expires) -> simpan
-~/.secrets/fb_page_token.txt + fb_user_token_ll.txt.
+DB settings (fb_page_token + fb_user_token_ll).
 """
 import json
 import urllib.error
@@ -94,9 +94,7 @@ def page_token_status(force=False):
                     return cached
             except Exception:
                 pass
-    token = ""
-    if config.TOKEN_FILE.exists():
-        token = config.TOKEN_FILE.read_text(encoding="utf-8").strip()
+    token = config.load_token()
     if not token or not config.PAGE_ID:
         status = "missing"
     else:
@@ -161,9 +159,9 @@ def activate_page_token(raw_token):
     page_token = match.get("access_token", "")
     if not page_token:
         return {"ok": False, "error": "FB tak bagi page token. Cuba lagi."}
-    # Simpan page token (never expires) + long-lived user token (60 hari)
-    config.TOKEN_FILE.write_text(page_token, encoding="utf-8")
-    (config.SECRETS_DIR / "fb_user_token_ll.txt").write_text(ll, encoding="utf-8")
+    # Simpan page token (never expires) + long-lived user token (60 hari) — DB
+    db.set_token("fb_page_token", page_token)
+    db.set_token("fb_user_token_ll", ll)
     db.set_setting("page_status", "ok")
     db.set_setting("page_status_at", datetime.now(timezone.utc).isoformat())
     return {"ok": True, "page_id": match["id"], "page_name": match.get("name", "")}

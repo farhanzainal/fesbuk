@@ -9,16 +9,17 @@ Usage:
 """
 import argparse
 try:
-    from fesbuk import config
+    from fesbuk import config, db
 except ImportError:
     import config
+    import db
 
 
 def main():
     p = argparse.ArgumentParser(description="Write fesbuk config from user-provided values")
     p.add_argument("--page-id", help="Facebook Page ID")
     p.add_argument("--page-name", help="Optional page name (display)")
-    p.add_argument("--token", help="Page access token (never-expires) -> ~/.secrets/fb_page_token.txt")
+    p.add_argument("--token", help="Page access token (never-expires) -> DB settings (fb_page_token)")
     p.add_argument("--app-id", help="Meta app ID")
     p.add_argument("--app-secret", help="Meta app secret")
     args = p.parse_args()
@@ -44,10 +45,10 @@ def main():
         env_path.write_text("".join(f"{k}={v}\n" for k, v in vals.items()), encoding="utf-8")
         print(f"[ok] .env written -> {env_path}")
 
-    # secrets (~/.secrets, auto-created by config import)
+    # secrets — DB settings (single source of truth)
     if args.token:
-        config.TOKEN_FILE.write_text(args.token.strip() + "\n", encoding="utf-8")
-        print(f"[ok] page token -> {config.TOKEN_FILE}")
+        db.set_token("fb_page_token", args.token.strip())
+        print("[ok] page token -> DB settings (fb_page_token)")
     if args.app_id and args.app_secret:
         config.APP_FILE.write_text(f"APP_ID={args.app_id}\nAPP_SECRET={args.app_secret}\n",
                                    encoding="utf-8")

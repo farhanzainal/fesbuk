@@ -7,7 +7,8 @@ Generic tool for posting to / reading / testing ANY Facebook Page via the Graph 
 1. **User** provides credentials / page info to the **agent** in conversation
    (page ID, tokens, app ID+secret). The user NEVER edits files.
 2. **Agent** runs `python src/fb_setup.py --page-id ... --token ... --app-id ... --app-secret ...`
-   — this writes `.env` and stores tokens in `~/.secrets/` automatically.
+   — this writes `.env`, stores the page token in the DB (settings table),
+   and app credentials in `~/.secrets/fb_app.txt` automatically.
 3. **Agent** verifies with `python src/fb_test.py`.
 4. **Agent** posts/reads via `fb_post.py` / `fb_read.py`.
 5. If `.env` doesn't exist yet, the agent creates it. If it exists, the agent updates it.
@@ -94,19 +95,19 @@ the **Marketing API** use case. Do this:
 `fb_spend.activate_token()` (route `/api/ads/activate`) exchanges the pasted token
 to a **long-lived token (~60 hari)** with the app's ID+Secret, verifies
 `GET /me/adaccounts`, then pulls snapshots into DB table `spend`
-(last_7d + this_month). The token is stored in a **dedicated file**:
+(last_7d + this_month). The token is stored in a **dedicated DB setting**:
 
 | Item | Location |
 |---|---|
-| Ads token (long-lived, dedicated) | `~/.secrets/fb_ads_token.txt` |
-| Page token (never expires) | `~/.secrets/fb_page_token.txt` |
-| Long-lived user token (page conn) | `~/.secrets/fb_user_token_ll.txt` |
-| Short user token (refresh) | `~/.secrets/fb_user_token.txt` |
+| Ads token (long-lived, dedicated) | DB setting `fb_ads_token` |
+| Page token (never expires) | DB setting `fb_page_token` |
+| Long-lived user token (page conn) | DB setting `fb_user_token_ll` |
+| Short user token (refresh) | DB setting `fb_user_token` |
 | App ID + Secret | `~/.secrets/fb_app.txt` |
 
-> **Why separate files:** the ads token (`fb_ads_token.txt`) is independent of the
-> page-connection user token (`fb_user_token_ll.txt`). Removing ads tracking
-> (delete `fb_ads_token.txt` + clear `spend` table) never breaks the dashboard.
+> **Why separate keys:** the ads token (`fb_ads_token`) is independent of the
+> page-connection user token (`fb_page_token`). Removing ads tracking
+> (`db.delete_token("fb_ads_token")` + clear `spend` table) never breaks the dashboard.
 
 ### Cron
 
@@ -131,7 +132,8 @@ exit 1 + message on failure).
    ```
    GET /me/accounts?access_token=<LONG_LIVED_USER_TOKEN>
    ```
-   Copy the page token for YOUR page into `~/.secrets/fb_page_token.txt`.
+   The page token is stored in the DB setting `fb_page_token` (via
+   `fb_setup.py --token ...` or the dashboard "Sambung Facebook Page" flow).
 7. Set your page ID: `copy .env.example .env` then edit `.env` (see below).
 
 ## .env (page config)
@@ -168,16 +170,22 @@ python src/fb_read.py 10         # last 10 posts + reactions/comments/shares
 
 ## Credentials (never commit)
 
-Secrets live in `~/.secrets/` (per-user home dir — config.py uses `Path.home()`,
-overridable via `FB_SECRETS_DIR` env var).
+**All access tokens live in the SQLite DB** (`database/fesbuk.db`, table `settings`)
+— single source of truth, NOT in files. Only `fb_app.txt` (App ID + Secret, not an
+access token) stays in `~/.secrets/`.
 
-| Item | Location |
+| Item | DB key / location |
 |---|---|
-| Page token (never expires) | `~/.secrets/fb_page_token.txt` |
-| Long-lived user token (60d) | `~/.secrets/fb_user_token_ll.txt` |
-| Short user token (refresh) | `~/.secrets/fb_user_token.txt` |
-| Ads token (long-lived, dedicated) | `~/.secrets/fb_ads_token.txt` |
+| Page token (never expires) | DB setting `fb_page_token` |
+| Long-lived user token (60d) | DB setting `fb_user_token_ll` |
+| Short user token (refresh) | DB setting `fb_user_token` |
+| Ads token (long-lived, dedicated) | DB setting `fb_ads_token` |
 | App ID + Secret | `~/.secrets/fb_app.txt` |
+
+Access in code: `db.get_token(key)` / `db.set_token(key, value)` /
+`db.delete_token(key)`; convenience: `config.load_token()` (page),
+`config.load_user_token()` (user), `config.load_ads_token()` (ads).
+`db.clear_all_tokens()` wipes every access token (fresh start).
 
 ## Cron / automation
 

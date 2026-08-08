@@ -11,7 +11,8 @@ No page is hardcoded; config lives in `.env` (written by the AGENT, never hand-e
 ## Hard rules (user-mandated)
 
 1. **Never commit secrets/data** — `.env`, `database/` (DB, images, docs), `~/.secrets/*` are gitignored.
-   Tokens live in `~/.secrets/` (per-user home; `FB_SECRETS_DIR` override).
+   Access tokens live in the DB (`database/fesbuk.db` settings table); only App ID+Secret
+   stays in `~/.secrets/fb_app.txt`.
 2. **Never post without user approval** — show the full post text first, get a GO.
 3. **No em-dash "—" in posts** — use "..." instead.
 4. **No price in posts** UNLESS the user explicitly says so for that post.
@@ -28,7 +29,7 @@ No page is hardcoded; config lives in `.env` (written by the AGENT, never hand-e
 
 1. User provides credentials/page info in conversation (page ID, tokens, app ID+secret).
 2. Agent runs `fesbuk-setup --page-id ... --token ... --app-id ... --app-secret ...`
-   (writes `.env` + `~/.secrets/` automatically).
+   (writes `.env` + stores page token in DB automatically; App creds ke `~/.secrets/`).
 3. Agent verifies with `fesbuk-test`.
 4. Agent posts/reads via `fesbuk-post` / `fesbuk-read`.
 5. If `.env` is missing the agent creates it; if present the agent updates it.
@@ -88,9 +89,19 @@ python src/fesbuk/fb_read.py 10              # last 10 posts + engagement
 python src/fesbuk/fb_setup.py --page-id ...  # write config from user values
 ```
 
-## Tokens (FAQ summary — see README for full FAQ)
+## Tokens (stored in DB — NOT files)
 
-- Facebook Graph tokens start with `EAAT...` (Threads tokens are graph.threads.net only).
+- **ALL access tokens live in the SQLite DB** (`database/fesbuk.db`, table `settings`),
+  NOT in `~/.secrets/` files. Single source of truth — never write/read token files.
+- Keys: `fb_page_token` (page, never expires — posting), `fb_user_token_ll` (user,
+  60 hari — page connection), `fb_user_token` (short-lived), `fb_ads_token` (ads).
+- Access via `db.get_token(key)` / `db.set_token(key, value)` / `db.delete_token(key)`,
+  or `config.load_token()` (page) / `config.load_user_token()` (user) /
+  `config.load_ads_token()` (ads).
+- `db.clear_all_tokens()` = fresh start (buang semua access token).
+- `~/.secrets/fb_app.txt` (App ID + Secret) is NOT an access token — stays a file.
+- Fresh start = `db.clear_all_tokens()` + delete `fb_page_token.txt`, `fb_user_token_ll.txt`,
+  `fb_user_token.txt`, `fb_ads_token.txt` if they exist + reset `page_status`/`ads_status`.
 - Flow: Explorer token (pages_show_list, pages_manage_posts, pages_read_engagement)
   → `fb_exchange_token` with the app's ID+Secret (app must be LIVE)
   → long-lived user token (60 days) → `/me/accounts` → page token (never expires).
@@ -104,10 +115,10 @@ python src/fesbuk/fb_setup.py --page-id ...  # write config from user values
   activation steps when the ads token is missing, and the Total Spent stats once
   activated. Route `/api/ads/activate` (POST {token}) activates; `/api/spend/refresh`
   re-pulls.
-- **Ads token is DEDICATED**: stored in `~/.secrets/fb_ads_token.txt` — SEPARATE from
-  `fb_user_token_ll.txt` (page connection). To remove ads tracking, delete
-  `fb_ads_token.txt` + clear table `spend` + set setting `ads_status` = `no_token`.
-  Do NOT delete `fb_user_token_ll.txt` — that breaks the dashboard page listing.
+- **Ads token is DEDICATED**: DB setting `fb_ads_token` — SEPARATE from
+  `fb_page_token` (page connection). To remove ads tracking: `db.delete_token("fb_ads_token")`
+  + clear table `spend` + set setting `ads_status` = `no_token`.
+  Do NOT delete `fb_page_token` — that breaks the dashboard page listing.
 - **To GET the `ads_read` permission (user-verified path, NO business portfolio
   needed):** `developers.facebook.com` → **My Apps** → pilih app → **Use Case** →
   tambah **Marketing API** → kat situ `ads_read` & `ads_management` tersedia.

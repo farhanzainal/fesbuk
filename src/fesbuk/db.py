@@ -220,6 +220,40 @@ def set_setting(key: str, value: str):
     conn.close()
 
 
+def delete_setting(key: str):
+    conn = _conn()
+    conn.execute("DELETE FROM settings WHERE key=?", (key,))
+    conn.commit()
+    conn.close()
+
+
+# ---------- tokens (stored in DB settings — NOT files) ----------
+# Single source of truth for all access tokens. Keys:
+#   fb_page_token     page token (never expires) — posting
+#   fb_user_token_ll  long-lived user token (60 hari) — page connection
+#   fb_user_token     short-lived user token (refresh)
+#   fb_ads_token      ads long-lived token — spend tracking
+TOKEN_KEYS = ("fb_page_token", "fb_user_token_ll", "fb_user_token", "fb_ads_token")
+
+
+def get_token(key: str) -> str:
+    return get_setting(key, "") or ""
+
+
+def set_token(key: str, value: str):
+    set_setting(key, value)
+
+
+def delete_token(key: str):
+    delete_setting(key)
+
+
+def clear_all_tokens():
+    """Fresh start — buang semua access token dari DB."""
+    for k in TOKEN_KEYS:
+        delete_setting(k)
+
+
 def hidden_pages() -> list:
     import json
     raw = get_setting("hidden_pages", "[]")

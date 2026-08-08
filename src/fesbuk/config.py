@@ -59,7 +59,72 @@ PAGE_NAME = _env_values().get("PAGE_NAME", "")
 
 
 def load_token() -> str:
-    return TOKEN_FILE.read_text(encoding="utf-8").strip()
+    """Page token — single source of truth: DB settings (fb_page_token).
+    Fallback ke fail lama (migrasi) kalau DB kosong."""
+    try:
+        from fesbuk import db
+    except ImportError:
+        import db
+    tok = db.get_token("fb_page_token")
+    if tok:
+        return tok
+    # Migrasi sekali: fail lama -> DB, lepas tu buang fail
+    if TOKEN_FILE.exists():
+        tok = TOKEN_FILE.read_text(encoding="utf-8").strip()
+        if tok:
+            db.set_token("fb_page_token", tok)
+            try:
+                TOKEN_FILE.unlink()
+            except OSError:
+                pass
+        return tok
+    return ""
+
+
+def load_user_token() -> str:
+    """User token (long-lived preferred) — DB settings, fallback fail lama."""
+    try:
+        from fesbuk import db
+    except ImportError:
+        import db
+    for key, fname in (("fb_user_token_ll", "fb_user_token_ll.txt"),
+                       ("fb_user_token", "fb_user_token.txt")):
+        tok = db.get_token(key)
+        if tok:
+            return tok
+        f = SECRETS_DIR / fname
+        if f.exists():
+            tok = f.read_text(encoding="utf-8").strip()
+            if tok:
+                db.set_token(key, tok)
+                try:
+                    f.unlink()
+                except OSError:
+                    pass
+                return tok
+    return ""
+
+
+def load_ads_token() -> str:
+    """Ads token — DB settings (fb_ads_token), fallback fail lama."""
+    try:
+        from fesbuk import db
+    except ImportError:
+        import db
+    tok = db.get_token("fb_ads_token")
+    if tok:
+        return tok
+    f = SECRETS_DIR / "fb_ads_token.txt"
+    if f.exists():
+        tok = f.read_text(encoding="utf-8").strip()
+        if tok:
+            db.set_token("fb_ads_token", tok)
+            try:
+                f.unlink()
+            except OSError:
+                pass
+        return tok
+    return ""
 
 
 def load_app_token() -> str:

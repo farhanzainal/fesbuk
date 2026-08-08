@@ -45,15 +45,9 @@ def _graph(path, token, params=None):
 
 
 def user_token():
-    """Ads token — DEDICATED file (fb_ads_token.txt), separate from the page
-    user token (fb_user_token_ll.txt). Page connection and ads tracking use
-    different files, so removing the ads token never breaks the dashboard."""
-    f = config.SECRETS_DIR / "fb_ads_token.txt"
-    if f.exists():
-        t = f.read_text(encoding="utf-8").strip()
-        if t:
-            return t
-    return None
+    """Ads token — DB settings (fb_ads_token), separate from page token
+    (fb_page_token). Removing the ads token never breaks the dashboard."""
+    return config.load_ads_token()
 
 
 def get_ad_accounts(token):
@@ -135,9 +129,9 @@ def activate_token(raw_token):
         return {"ok": False,
                 "error": "Token OK tapi user takde kaitan dgn mana-mana ad account. "
                          "Sambung user dalam Ads Manager / Business Manager dulu."}
-    # Simpan long-lived ads token (60 hari) — fail DEDICATED, asing dari
-    # fb_user_token_ll.txt (page connection). Buang fail ni = buang token ads.
-    (config.SECRETS_DIR / "fb_ads_token.txt").write_text(ll, encoding="utf-8")
+    # Simpan long-lived ads token (60 hari) — DB settings, asing dari
+    # fb_page_token (page connection). Buang key ni = buang token ads.
+    db.set_token("fb_ads_token", ll)
     act = accts[0]
     results = {}
     for preset in ("last_7d", "this_month"):
@@ -187,7 +181,7 @@ def pull_and_store():
     token = user_token()
     if not token:
         return {"ok": False,
-                "error": "Tiada user token. Check ~/.secrets/fb_ads_token.txt."}
+                "error": "Tiada user token. Tampal token di halaman Ads Manager dulu."}
     try:
         accts = get_ad_accounts(token)
     except Exception as e:

@@ -27,13 +27,9 @@ def _token_for(page_id=None):
 def get_page_token(page_id: str) -> str:
     """Fetch the access token for a specific page via the long-lived user token."""
     import requests
-    utoken = None
-    for f in (config.SECRETS_DIR / "fb_user_token_ll.txt", config.SECRETS_DIR / "fb_user_token.txt"):
-        if f.exists():
-            utoken = f.read_text(encoding="utf-8").strip()
-            break
+    utoken = config.load_user_token()
     if not utoken:
-        raise RuntimeError("User token tiada dalam ~/.secrets")
+        raise RuntimeError("User token tiada dalam DB")
     resp = requests.get(
         f"{config.GRAPH}/me/accounts",
         params={"access_token": utoken, "fields": "id,name,access_token"},

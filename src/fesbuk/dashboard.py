@@ -828,11 +828,7 @@ def _page_live(page_id, page_token):
 
 def connected_pages():
     """All pages visible to the user token, with live status + hidden flag."""
-    token = None
-    for f in (config.SECRETS_DIR / "fb_user_token_ll.txt", config.SECRETS_DIR / "fb_user_token.txt"):
-        if f.exists():
-            token = f.read_text(encoding="utf-8").strip()
-            break
+    token = config.load_user_token()
     if not token:
         return [], False
     hidden = set(db.hidden_pages())
